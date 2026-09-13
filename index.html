@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>五子棋 正統規則對戰（啟發式搜尋完全體）</title>
+<title>五子棋 正統規則對戰（啟發式搜尋）</title>
 <style>
 body { margin:0; font-family:'Segoe UI',sans-serif; text-align:center; display:flex; flex-direction:column; align-items:center; padding:20px; background:linear-gradient(to bottom,#f8f8f8,#e0e0e0); position: relative; min-height: 100vh; }
 h2 { font-size:2em; margin:10px 0; color:#222; text-shadow:1px 1px 2px #aaa; }
@@ -394,6 +394,7 @@ function minimax(tempBoard, depth, alpha, beta, isMaximizing, lastX, lastY, aiPl
 </script>
 
 <!-- ================= Web Worker 包裝層 (加入迭代加深 Iterative Deepening) ================= -->
+<!-- ================= Web Worker 包裝層 (加入迭代加深 Iterative Deepening) ================= -->
 <script id="aiWorkerWrapper" type="javascript/worker">
 self.onmessage = function(e) {
     const { boardData, moves, targetDepth, aiPlayerId, sharedBuffer } = e.data;
@@ -468,6 +469,7 @@ self.onmessage = function(e) {
     self.postMessage({ type: 'done', bestMove: bestMove, maxEval: maxEval });
 };
 </script>
+
 
 <!-- ================= 主程式 UI 與控制邏輯 ================= -->
 <script>
