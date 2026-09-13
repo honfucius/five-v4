@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>五子棋 正統規則對戰（啟發式搜尋）</title>
+<title>五子棋 正統規則對戰（終極啟發多核版）</title>
 <style>
 body { margin:0; font-family:'Segoe UI',sans-serif; text-align:center; display:flex; flex-direction:column; align-items:center; padding:20px; background:linear-gradient(to bottom,#f8f8f8,#e0e0e0); position: relative; min-height: 100vh; }
 h2 { font-size:2em; margin:10px 0; color:#222; text-shadow:1px 1px 2px #aaa; }
@@ -51,7 +51,7 @@ button:disabled { background-color: #999; cursor: not-allowed; }
     <input type="number" id="depthInput" value="8" min="1" max="15" onchange="updateDepth()">
 </div>
 
-<h2>🎯 正統五子棋（啟發式搜尋版）</h2>
+<h2>🎯 正統五子棋（終極完全體）</h2>
 <div id="status">請黑棋先手落子 (第一手必須在正中央)</div>
 <div id="coreInfo"></div>
 
@@ -75,9 +75,9 @@ button:disabled { background-color: #999; cursor: not-allowed; }
 <div class="rules">
 <h3>📝 系統與規則說明</h3>
 <ul>
-<li><strong>啟發式大腦：</strong>導入「迭代加深 (Iterative Deepening)」與「歷史表 (History Heuristic)」，AI 具備學習能力，剪枝效率暴增。</li>
-<li><strong>極限查表與多核：</strong>維持 1D 記憶體連續性、O(1) 狀態查表與 Atomics 全核同步剪枝技術。</li>
-<li><strong>完美防禦：</strong>修復了所有死三/活三誤判，並精確阻擋玩家的雙殺陷阱。</li>
+<li><strong>終極運算架構：</strong>結合 1D 記憶體連續性、O(1) 滑動視窗查表、Atomics 跨核同步剪枝，效能推向極致。</li>
+<li><strong>高階大腦：</strong>搭載「迭代加深」與「歷史啟發」，剪枝效率逼近理論極限。</li>
+<li><strong>防禦修正：</strong>具備精準防禦死三/活三的能力，無禁手誤判。</li>
 </ul>
 </div>
 
@@ -90,7 +90,7 @@ const SCORE_DEAD_4 = 10000;
 const MIN_INF = -100000000;
 const MAX_INF = 100000000;
 
-// 全域歷史表 (History Table)，用於記錄引發剪枝的好棋
+// 全域歷史表 (History Table)
 const historyTable = new Int32Array(225);
 
 // LUT 表
@@ -309,7 +309,6 @@ function evaluateMoveImpact(tempBoard, px, py, aiPlayerId) {
     return aiScore + humanScore; 
 }
 
-// 導入歷史表 (History Heuristic) 進行分支預排序
 function generateCandidateMoves(currentBoard, aiPlayerId) {
     let moves = [];
     let hasStone = false;
@@ -329,14 +328,14 @@ function generateCandidateMoves(currentBoard, aiPlayerId) {
             }
             if (isNear) {
                 let staticScore = evaluateMoveImpact(currentBoard, x, y, aiPlayerId);
-                let histScore = historyTable[x + y * size]; // 加上歷史啟發分數
+                let histScore = historyTable[x + y * size];
                 moves.push({x: x, y: y, score: staticScore + histScore});
             }
         }
     }
     if (!hasStone) return [{x:7, y:7}];
     
-    // 放寬分支數至 12，因為剪枝效率極高，能容納更寬的視野
+    // 放寬分支數至 12，提供更寬廣的視野
     return moves.sort((a, b) => b.score - a.score).slice(0, 12);
 }
 
@@ -364,7 +363,7 @@ function minimax(tempBoard, depth, alpha, beta, isMaximizing, lastX, lastY, aiPl
             if (eval > maxEval) maxEval = eval;
             if (eval > alpha) alpha = eval;
             if (beta <= alpha) {
-                // 剪枝發生：給予歷史表重賞，越深層的剪枝價值越高
+                // 歷史啟發：給予引發剪枝的好棋重賞
                 historyTable[move.x + move.y * size] += (depth * depth * 500);
                 break; 
             }
@@ -383,7 +382,7 @@ function minimax(tempBoard, depth, alpha, beta, isMaximizing, lastX, lastY, aiPl
             if (eval < minEval) minEval = eval;
             if (eval < beta) beta = eval;
             if (beta <= alpha) {
-                // 剪枝發生：給予歷史表重賞
+                // 歷史啟發：給予引發剪枝的好棋重賞
                 historyTable[move.x + move.y * size] += (depth * depth * 500);
                 break; 
             }
@@ -393,8 +392,7 @@ function minimax(tempBoard, depth, alpha, beta, isMaximizing, lastX, lastY, aiPl
 }
 </script>
 
-<!-- ================= Web Worker 包裝層 (加入迭代加深 Iterative Deepening) ================= -->
-<!-- ================= Web Worker 包裝層 (加入迭代加深 Iterative Deepening) ================= -->
+<!-- ================= Web Worker 包裝層 (迭代加深) ================= -->
 <script id="aiWorkerWrapper" type="javascript/worker">
 self.onmessage = function(e) {
     const { boardData, moves, targetDepth, aiPlayerId, sharedBuffer } = e.data;
@@ -406,14 +404,14 @@ self.onmessage = function(e) {
     let bestMove = null;
     let maxEval = MIN_INF;
     
-    // 每次搜選前清空歷史表
+    // 每次搜尋前清空歷史表
     historyTable.fill(0);
     
     // 迭代加深 (Iterative Deepening)
     for (let d = 1; d <= targetDepth; d++) {
         maxEval = MIN_INF;
         
-        // 根據上一層的預判分數重新排序 (最精華的 Alpha-Beta 優化)
+        // 利用上一層的預判分數重新優化排序
         moves.sort((a, b) => {
             let scoreA = a.evalScore !== undefined ? a.evalScore : a.score;
             let scoreB = b.evalScore !== undefined ? b.evalScore : b.score;
@@ -432,13 +430,13 @@ self.onmessage = function(e) {
             let evalScore = minimax(board, d - 1, initialAlpha, MAX_INF, false, move.x, move.y, aiPlayerId);
             board[move.x + move.y * size] = 0;
             
-            move.evalScore = evalScore; // 記錄給下一層排序用
+            move.evalScore = evalScore; // 記錄給下一層作排序
             
             if (evalScore > maxEval) {
                 maxEval = evalScore;
                 bestMove = move;
                 
-                // 只有在最後一層，或找到必勝棋時，才強烈推動全域 Alpha 閾值
+                // 動態推高全域 Alpha 閾值
                 if (sharedAlpha && (d === targetDepth || evalScore >= SCORE_WIN)) {
                     let expectedAlpha = Atomics.load(sharedAlpha, 0);
                     while (evalScore > expectedAlpha) {
@@ -449,16 +447,15 @@ self.onmessage = function(e) {
                 }
             }
             
-            // UI 進度條只在最終深度觸發
+            // 僅在最終深度回報進度條
             if (d === targetDepth) {
                 self.postMessage({ type: 'progress' });
             }
         }
         
-        // 如果在較淺層已經找到必殺棋，直接提早中斷深化，節省海量時間
+        // 發現必勝/必殺棋，提早結束深化
         if (maxEval >= SCORE_WIN) {
             if (d < targetDepth) {
-                // 補齊進度條
                 let skips = (targetDepth - d) * moves.length;
                 for(let s=0; s<skips; s++) self.postMessage({ type: 'progress' });
             }
@@ -470,9 +467,9 @@ self.onmessage = function(e) {
 };
 </script>
 
-
 <!-- ================= 主程式 UI 與控制邏輯 ================= -->
 <script>
+// 共用 AI 核心與 LUT
 eval(document.getElementById('aiCoreCode').textContent);
 
 const canvas = document.getElementById('board');
@@ -490,7 +487,7 @@ let hasSharedMemory = typeof SharedArrayBuffer !== 'undefined';
 const maxCores = navigator.hardwareConcurrency || 4;
 
 if (hasSharedMemory) {
-    coreInfoDiv.textContent = `⚡ 終極啟發版：迭代加深 + 歷史表 + 滿血 ${maxCores} 核`;
+    coreInfoDiv.textContent = `⚡ 終極啟發版：迭代加深 + 歷史表 + 滿血 ${maxCores} 核平行`;
 } else {
     coreInfoDiv.style.color = "#d93025";
     coreInfoDiv.innerHTML = `⚠️ 無 COOP/COEP：已套用啟發式大腦，但退回單核安全模式。`;
@@ -671,13 +668,12 @@ function triggerAIWorker() {
     let aiPlayerId = currentPlayer;
     let opponentId = 3 - aiPlayerId;
     
-    // 主執行緒先產生候選步並初步排序，放寬至 24 步
+    // 主執行緒先產生候選步
     let candidates = generateCandidateMoves(board, aiPlayerId);
     if (aiPlayerId === 1) {
         candidates = candidates.filter(m => !checkForbidden(board, m.x, m.y));
     }
 
-    // 檢查是否有秒殺或秒擋
     for (let move of candidates) {
         board[move.x + move.y * size] = aiPlayerId;
         if (checkWin(board, move.x, move.y, aiPlayerId)) { board[move.x + move.y * size] = 0; applyAIMove(move); return; }
