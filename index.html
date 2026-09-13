@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>五子棋 正統規則對戰（啟發式搜尋完全體）</title>
+<style>
+body { margin:0; font-family:'Segoe UI',sans-serif; text-align:center; display:flex; flex-direction:column; align-items:center; padding:20px; background:linear-gradient(to bottom,#f8f8f8,#e0e0e0); position: relative; min-height: 100vh; }
+h2 { font-size:2em; margin:10px 0; color:#222; text-shadow:1px 1px 2px #aaa; }
+canvas { border:4px solid #555; background-color:#f9d18c; box-shadow:0 4px 20px rgba(0,0,0,0.2); margin-bottom:15px; max-width:100%; height:auto; touch-action:none; cursor:pointer; }
+#status { font-size:1.2em; color:#d93025; font-weight:bold; margin-bottom:5px; min-height: 28px; }
+#coreInfo { font-size: 0.9em; color: #1e8e3e; font-weight: bold; margin-bottom: 5px; }
+
+.depth-setting {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    background: white;
+    padding: 8px 12px;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: bold;
+    color: #333;
+    z-index: 10;
+}
+.depth-setting input { width: 45px; padding: 4px; border: 1px solid #aaa; border-radius: 4px; font-size: 1em; text-align: center; }
+.controls { margin-bottom:10px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.btn-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+select { padding: 8px; font-size: 1em; border-radius: 6px; cursor: pointer; border: 1px solid #555; }
+button { padding:8px 14px; font-size:1em; border:none; border-radius:6px; cursor:pointer; background-color:#555; color:white; transition:.3s; }
+button:hover { background-color:#222; }
+button:disabled { background-color: #999; cursor: not-allowed; }
+#progressContainer { display: none; width: 100%; max-width: 400px; background: #ddd; border-radius: 8px; overflow: hidden; height: 16px; margin-bottom: 10px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.2); }
+#progressBar { width: 0%; height: 100%; background: #1e8e3e; transition: width 0.1s linear; }
+.rules { max-width:600px; text-align:left; background:white; padding:15px 25px; border-radius:8px; margin-top:10px; box-shadow:0 2px 10px rgba(0,0,0,0.1); line-height: 1.5; }
+.rules h3 { margin-top:0; color:#333; border-bottom: 2px solid #ddd; padding-bottom: 5px; }
+.rules ul { margin:10px 0; padding-left:20px; }
+
+@media (max-width: 600px) {
+    .depth-setting { position: relative; top: 0; right: 0; margin-bottom: 10px; }
+}
+</style>
+</head>
+<body>
+
+<div class="depth-setting">
+    <label for="depthInput">🧠 AI 深度:</label>
+    <input type="number" id="depthInput" value="8" min="1" max="15" onchange="updateDepth()">
+</div>
+
+<h2>🎯 正統五子棋（啟發式搜尋版）</h2>
+<div id="status">請黑棋先手落子 (第一手必須在正中央)</div>
+<div id="coreInfo"></div>
+
+<div class="controls">
+    <div class="btn-group">
+        <select id="modeSelect" onchange="changeMode()">
+            <option value="pva">玩家 (黑) vs AI (白)</option>
+            <option value="avp">AI (黑) vs 玩家 (白)</option>
+            <option value="pvp">玩家 vs 玩家</option>
+        </select>
+        <button onclick="restartGame()" id="restartBtn">🔁 重新開始</button>
+        <button onclick="undoMove()" id="undoBtn">🔙 悔棋</button>
+    </div>
+    <div id="progressContainer">
+        <div id="progressBar"></div>
+    </div>
+</div>
+
+<canvas id="board" width="600" height="600"></canvas>
+
+<div class="rules">
+<h3>📝 系統與規則說明</h3>
+<ul>
+<li><strong>啟發式大腦：</strong>導入「迭代加深 (Iterative Deepening)」與「歷史表 (History Heuristic)」，AI 具備學習能力，剪枝效率暴增。</li>
+<li><strong>極限查表與多核：</strong>維持 1D 記憶體連續性、O(1) 狀態查表與 Atomics 全核同步剪枝技術。</li>
+<li><strong>完美防禦：</strong>修復了所有死三/活三誤判，並精確阻擋玩家的雙殺陷阱。</li>
+</ul>
+</div>
+
+<!-- ================= 核心 AI 與 LUT 運算邏輯 (主執行緒與 Worker 共用) ================= -->
+<script id="aiCoreCode">
+const size = 15;
+const SCORE_WIN = 10000000;
+const SCORE_ALIVE_4 = 100000;
+const SCORE_DEAD_4 = 10000;
+const MIN_INF = -100000000;
+const MAX_INF = 100000000;
+
+// 全域歷史表 (History Table)，用於記錄引發剪枝的好棋
+const historyTable = new Int32Array(225);
+
+// LUT 表
+const lutType = new Uint8Array(729);
+const lutFours = new Uint8Array(729);
+const lutThrees = new Uint8Array(729);
+
+function initLUT() {
+    for (let i = 0; i < 729; i++) {
+        let val = i;
+        let str = '';
+        for (let j = 0; j < 6; j++) {
+            str += (val % 3);
+            val = (val / 3) | 0;
+        }
+        
+        let type = 0;
+        if (str.includes('11111')) type = 6;
+        else if (str === '011110') type = 5;
+        else if (/(211110|011112|10111|11011|11101)/.test(str)) type = 4;
+        else if (/(011100|001110|010110|011010)/.test(str)) type = 3;
+        else if (/(211100|001112|210110|011012|010112|211010|10011|11001|201110|011102|10101)/.test(str)) type = 2;
+        else if (/(001100|01010|010010)/.test(str)) type = 1;
+        
+        lutType[i] = type;
+        
+        let isFour = 0;
+        if (/(011110|211110|011112|10111|11011|11101)/.test(str)) isFour = 1;
+        let isThree = 0;
+        if (/(011100|001110|010110|011010)/.test(str)) isThree = 1;
+        
+        lutFours[i] = isFour;
+        lutThrees[i] = isThree;
+    }
+}
+initLUT();
+
+const lineArr = new Uint8Array(17);
+let retScore = 0, retAlive3 = 0, retFours = 0, retThrees = 0;
+
+function evaluateDirection(tempBoard, startX, startY, dx, dy, player, isMyTurn) {
+    let len = 0;
+    lineArr[len++] = 2; 
+    let x = startX, y = startY;
+    while (x >= 0 && x < size && y >= 0 && y < size) {
+        let p = tempBoard[x + y * size];
+        lineArr[len++] = (p === 0) ? 0 : (p === player ? 1 : 2);
+        x += dx; y += dy;
+    }
+    lineArr[len++] = 2; 
+    
+    retScore = 0; retAlive3 = 0;
+    if (len < 6) return;
+    
+    let hasWin = 0, hasAlive4 = 0, hasDead4 = 0, hasAlive3 = 0, hasDead3 = 0, hasAlive2 = 0;
+    
+    let hash = lineArr[0] + lineArr[1]*3 + lineArr[2]*9 + lineArr[3]*27 + lineArr[4]*81;
+    for (let i = 5; i < len; i++) {
+        hash += lineArr[i] * 243;
+        
+        let t = lutType[hash];
+        if (t === 6) hasWin = 1;
+        else if (t === 5) hasAlive4 = 1;
+        else if (t === 4) hasDead4 = 1;
+        else if (t === 3) hasAlive3 = 1;
+        else if (t === 2) hasDead3 = 1;
+        else if (t === 1) hasAlive2 = 1;
+        
+        hash = (hash / 3) | 0; 
+    }
+    
+    if (hasWin) {
+        retScore = 500000;
+    } else {
+        if (hasAlive4) retScore += (isMyTurn ? 500000 : 100000);
+        else if (hasDead4) retScore += (isMyTurn ? 500000 : 10000);
+        if (hasAlive3) { retScore += 1000; retAlive3 = 1; } 
+        else if (hasDead3) { retScore += 100; }
+        if (hasAlive2) retScore += 10;
+    }
+}
+
+function evaluateDirectionForbidden(tempBoard, startX, startY, dx, dy) {
+    let len = 0;
+    lineArr[len++] = 2; 
+    let x = startX, y = startY;
+    while (x >= 0 && x < size && y >= 0 && y < size) {
+        let p = tempBoard[x + y * size];
+        lineArr[len++] = (p === 0) ? 0 : (p === 1 ? 1 : 2);
+        x += dx; y += dy;
+    }
+    lineArr[len++] = 2; 
+    
+    retFours = 0; retThrees = 0;
+    if (len < 6) return;
+    
+    let hash = lineArr[0] + lineArr[1]*3 + lineArr[2]*9 + lineArr[3]*27 + lineArr[4]*81;
+    for (let i = 5; i < len; i++) {
+        hash += lineArr[i] * 243;
+        if (lutFours[hash]) retFours = 1;
+        if (lutThrees[hash]) retThrees = 1;
+        hash = (hash / 3) | 0;
+    }
+}
+
+function checkWin(tempBoard, x, y, p) {
+    const dirs = [{dx:1, dy:0}, {dx:0, dy:1}, {dx:1, dy:1}, {dx:1, dy:-1}];
+    for (const d of dirs) {
+        let count = 1;
+        for (let i = 1; i <= 5; i++) {
+            const nx = x + d.dx * i, ny = y + d.dy * i;
+            if (nx < 0 || ny < 0 || nx >= size || ny >= size || tempBoard[nx + ny * size] !== p) break;
+            count++;
+        }
+        for (let i = 1; i <= 5; i++) {
+            const nx = x - d.dx * i, ny = y - d.dy * i;
+            if (nx < 0 || ny < 0 || nx >= size || ny >= size || tempBoard[nx + ny * size] !== p) break;
+            count++;
+        }
+        if (p === 1 && count === 5) return true;
+        if (p === 2 && count >= 5) return true;
+    }
+    return false;
+}
+
+function checkOverline(tempBoard, x, y) {
+    const dirs = [{dx:1, dy:0}, {dx:0, dy:1}, {dx:1, dy:1}, {dx:1, dy:-1}];
+    for (const d of dirs) {
+        let count = 1;
+        for (let i = 1; i <= 6; i++) {
+            const nx = x + d.dx * i, ny = y + d.dy * i;
+            if (nx < 0 || ny < 0 || nx >= size || ny >= size || tempBoard[nx + ny * size] !== 1) break;
+            count++;
+        }
+        for (let i = 1; i <= 6; i++) {
+            const nx = x - d.dx * i, ny = y - d.dy * i;
+            if (nx < 0 || ny < 0 || nx >= size || ny >= size || tempBoard[nx + ny * size] !== 1) break;
+            count++;
+        }
+        if (count > 5) return true; 
+    }
+    return false;
+}
+
+function checkForbidden(tempBoard, px, py) {
+    let original = tempBoard[px + py * size];
+    tempBoard[px + py * size] = 1; 
+    if (checkOverline(tempBoard, px, py)) { tempBoard[px + py * size] = original; return "長連"; }
+    
+    let fours = 0, threes = 0;
+    let d1_min = Math.min(px, py), d2_min = Math.min(px, size - 1 - py);
+    let lines = [
+        [0, py, 1, 0], [px, 0, 0, 1], 
+        [px - d1_min, py - d1_min, 1, 1], [px - d2_min, py + d2_min, 1, -1] 
+    ];
+    
+    for (let [sx, sy, dx, dy] of lines) {
+        evaluateDirectionForbidden(tempBoard, sx, sy, dx, dy);
+        fours += retFours; 
+        threes += retThrees;
+    }
+    
+    tempBoard[px + py * size] = original; 
+    if (fours >= 2) return "雙四";
+    if (threes >= 2) return "雙三";
+    return null;
+}
+
+function evaluateBoard(tempBoard, isMaximizing, aiPlayerId) {
+    let aiScore = 0, aiAlive3Count = 0;
+    let humanScore = 0, humanAlive3Count = 0;
+    let opponentId = 3 - aiPlayerId;
+
+    function processLine(sx, sy, dx, dy) {
+        evaluateDirection(tempBoard, sx, sy, dx, dy, aiPlayerId, isMaximizing);
+        aiScore += retScore; aiAlive3Count += retAlive3;
+        evaluateDirection(tempBoard, sx, sy, dx, dy, opponentId, !isMaximizing);
+        humanScore += retScore; humanAlive3Count += retAlive3;
+    }
+
+    for (let y = 0; y < size; y++) processLine(0, y, 1, 0);
+    for (let x = 0; x < size; x++) processLine(x, 0, 0, 1);
+    for (let k = -size + 1; k < size; k++) processLine(Math.max(0, k), Math.max(0, -k), 1, 1);
+    for (let k = 0; k < size * 2 - 1; k++) processLine(Math.max(0, k - size + 1), Math.min(size - 1, k), 1, -1);
+
+    if (aiAlive3Count >= 2) aiScore += SCORE_ALIVE_4;
+    if (humanAlive3Count >= 2) humanScore += SCORE_ALIVE_4;
+    return aiScore - (humanScore * 2.0); 
+}
+
+function evaluateMoveImpact(tempBoard, px, py, aiPlayerId) {
+    let opponentId = 3 - aiPlayerId;
+    let d1_min = Math.min(px, py), d2_min = Math.min(px, size - 1 - py);
+    let lines = [
+        [0, py, 1, 0], [px, 0, 0, 1], 
+        [px - d1_min, py - d1_min, 1, 1], [px - d2_min, py + d2_min, 1, -1] 
+    ];
+    
+    tempBoard[px + py * size] = aiPlayerId; 
+    let aiScore = 0, aiAlive3 = 0;
+    for (let [sx, sy, dx, dy] of lines) {
+        evaluateDirection(tempBoard, sx, sy, dx, dy, aiPlayerId, false);
+        aiScore += retScore; aiAlive3 += retAlive3;
+    }
+    
+    tempBoard[px + py * size] = opponentId; 
+    let humanScore = 0, humanAlive3 = 0;
+    for (let [sx, sy, dx, dy] of lines) {
+        evaluateDirection(tempBoard, sx, sy, dx, dy, opponentId, false);
+        humanScore += retScore; humanAlive3 += retAlive3;
+    }
+    
+    tempBoard[px + py * size] = 0; 
+    if (aiAlive3 >= 2) aiScore += SCORE_ALIVE_4;
+    if (humanAlive3 >= 2) humanScore += SCORE_ALIVE_4;
+    return aiScore + humanScore; 
+}
+
+// 導入歷史表 (History Heuristic) 進行分支預排序
+function generateCandidateMoves(currentBoard, aiPlayerId) {
+    let moves = [];
+    let hasStone = false;
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y++) {
+            if (currentBoard[x + y * size] !== 0) { hasStone = true; continue; }
+            let isNear = false;
+            for(let dx = -2; dx <= 2; dx++){
+                for(let dy = -2; dy <= 2; dy++){
+                    if(dx===0 && dy===0) continue;
+                    let nx = x + dx, ny = y + dy;
+                    if(nx>=0 && nx<size && ny>=0 && ny<size && currentBoard[nx + ny * size] !== 0) {
+                        isNear = true; break;
+                    }
+                }
+                if(isNear) break;
+            }
+            if (isNear) {
+                let staticScore = evaluateMoveImpact(currentBoard, x, y, aiPlayerId);
+                let histScore = historyTable[x + y * size]; // 加上歷史啟發分數
+                moves.push({x: x, y: y, score: staticScore + histScore});
+            }
+        }
+    }
+    if (!hasStone) return [{x:7, y:7}];
+    
+    // 放寬分支數至 12，因為剪枝效率極高，能容納更寬的視野
+    return moves.sort((a, b) => b.score - a.score).slice(0, 12);
+}
+
+function minimax(tempBoard, depth, alpha, beta, isMaximizing, lastX, lastY, aiPlayerId) {
+    let opponentId = 3 - aiPlayerId;
+    if (lastX !== undefined) {
+        let lastPlayer = isMaximizing ? opponentId : aiPlayerId; 
+        if (checkWin(tempBoard, lastX, lastY, lastPlayer)) {
+            return lastPlayer === aiPlayerId ? SCORE_WIN + depth : -SCORE_WIN - depth;
+        }
+    }
+    if (depth === 0) return evaluateBoard(tempBoard, isMaximizing, aiPlayerId);
+
+    let candidates = generateCandidateMoves(tempBoard, aiPlayerId);
+    if (isMaximizing) { 
+        let maxEval = MIN_INF;
+        for (let i = 0; i < candidates.length; i++) {
+            let move = candidates[i];
+            if (aiPlayerId === 1 && checkForbidden(tempBoard, move.x, move.y)) continue;
+            
+            tempBoard[move.x + move.y * size] = aiPlayerId;
+            let eval = minimax(tempBoard, depth - 1, alpha, beta, false, move.x, move.y, aiPlayerId);
+            tempBoard[move.x + move.y * size] = 0;
+            
+            if (eval > maxEval) maxEval = eval;
+            if (eval > alpha) alpha = eval;
+            if (beta <= alpha) {
+                // 剪枝發生：給予歷史表重賞，越深層的剪枝價值越高
+                historyTable[move.x + move.y * size] += (depth * depth * 500);
+                break; 
+            }
+        }
+        return maxEval === MIN_INF ? evaluateBoard(tempBoard, isMaximizing, aiPlayerId) : maxEval;
+    } else { 
+        let minEval = MAX_INF;
+        for (let i = 0; i < candidates.length; i++) {
+            let move = candidates[i];
+            if (opponentId === 1 && checkForbidden(tempBoard, move.x, move.y)) continue;
+            
+            tempBoard[move.x + move.y * size] = opponentId;
+            let eval = minimax(tempBoard, depth - 1, alpha, beta, true, move.x, move.y, aiPlayerId);
+            tempBoard[move.x + move.y * size] = 0;
+            
+            if (eval < minEval) minEval = eval;
+            if (eval < beta) beta = eval;
+            if (beta <= alpha) {
+                // 剪枝發生：給予歷史表重賞
+                historyTable[move.x + move.y * size] += (depth * depth * 500);
+                break; 
+            }
+        }
+        return minEval === MAX_INF ? evaluateBoard(tempBoard, isMaximizing, aiPlayerId) : minEval;
+    }
+}
+</script>
+
+<!-- ================= Web Worker 包裝層 (加入迭代加深 Iterative Deepening) ================= -->
+<script id="aiWorkerWrapper" type="javascript/worker">
+self.onmessage = function(e) {
+    const { boardData, moves, targetDepth, aiPlayerId, sharedBuffer } = e.data;
+    const board = new Uint8Array(boardData); 
+    
+    let sharedAlpha = null;
+    if (sharedBuffer) sharedAlpha = new Int32Array(sharedBuffer);
+
+    let bestMove = null;
+    let maxEval = MIN_INF;
+    
+    // 每次搜選前清空歷史表
+    historyTable.fill(0);
+    
+    // 迭代加深 (Iterative Deepening)
+    for (let d = 1; d <= targetDepth; d++) {
+        maxEval = MIN_INF;
+        
+        // 根據上一層的預判分數重新排序 (最精華的 Alpha-Beta 優化)
+        moves.sort((a, b) => {
+            let scoreA = a.evalScore !== undefined ? a.evalScore : a.score;
+            let scoreB = b.evalScore !== undefined ? b.evalScore : b.score;
+            return scoreB - scoreA;
+        });
+
+        for(let i = 0; i < moves.length; i++) {
+            let move = moves[i];
+            board[move.x + move.y * size] = aiPlayerId;
+            
+            let initialAlpha = MIN_INF;
+            if (sharedAlpha) {
+                initialAlpha = Math.max(MIN_INF, Atomics.load(sharedAlpha, 0));
+            }
+
+            let evalScore = minimax(board, d - 1, initialAlpha, MAX_INF, false, move.x, move.y, aiPlayerId);
+            board[move.x + move.y * size] = 0;
+            
+            move.evalScore = evalScore; // 記錄給下一層排序用
+            
+            if (evalScore > maxEval) {
+                maxEval = evalScore;
+                bestMove = move;
+                
+                // 只有在最後一層，或找到必勝棋時，才強烈推動全域 Alpha 閾值
+                if (sharedAlpha && (d === targetDepth || evalScore >= SCORE_WIN)) {
+                    let expectedAlpha = Atomics.load(sharedAlpha, 0);
+                    while (evalScore > expectedAlpha) {
+                        let actual = Atomics.compareExchange(sharedAlpha, 0, expectedAlpha, evalScore);
+                        if (actual === expectedAlpha) break; 
+                        expectedAlpha = actual; 
+                    }
+                }
+            }
+            
+            // UI 進度條只在最終深度觸發
+            if (d === targetDepth) {
+                self.postMessage({ type: 'progress' });
+            }
+        }
+        
+        // 如果在較淺層已經找到必殺棋，直接提早中斷深化，節省海量時間
+        if (maxEval >= SCORE_WIN) {
+            if (d < targetDepth) {
+                // 補齊進度條
+                let skips = (targetDepth - d) * moves.length;
+                for(let s=0; s<skips; s++) self.postMessage({ type: 'progress' });
+            }
+            break;
+        }
+    }
+    
+    self.postMessage({ type: 'done', bestMove: bestMove, maxEval: maxEval });
+};
+</script>
+
+<!-- ================= 主程式 UI 與控制邏輯 ================= -->
+<script>
+eval(document.getElementById('aiCoreCode').textContent);
+
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const cellSize = canvas.width / size; 
+
+const statusDiv = document.getElementById('status');
+const coreInfoDiv = document.getElementById('coreInfo');
+const modeSelect = document.getElementById('modeSelect');
+const progressContainer = document.getElementById('progressContainer');
+const progressBar = document.getElementById('progressBar');
+const depthInput = document.getElementById('depthInput');
+
+let hasSharedMemory = typeof SharedArrayBuffer !== 'undefined';
+const maxCores = navigator.hardwareConcurrency || 4;
+
+if (hasSharedMemory) {
+    coreInfoDiv.textContent = `⚡ 終極啟發版：迭代加深 + 歷史表 + 滿血 ${maxCores} 核`;
+} else {
+    coreInfoDiv.style.color = "#d93025";
+    coreInfoDiv.innerHTML = `⚠️ 無 COOP/COEP：已套用啟發式大腦，但退回單核安全模式。`;
+}
+
+let board = new Uint8Array(size * size);
+let history = [];
+let currentPlayer = 1; 
+let gameOver = false;
+let gameMode = 'pva';
+let isAIThinking = false;
+let aiSearchDepth = 5; 
+
+let activeWorkers = [];
+let totalMovesToProcess = 0;
+let processedMovesCount = 0;
+
+function updateDepth() {
+    let val = parseInt(depthInput.value);
+    if (isNaN(val) || val < 1) val = 1;
+    if (val > 10) val = 10; 
+    depthInput.value = val;
+    aiSearchDepth = val;
+}
+
+function init() {
+    board = new Uint8Array(size * size); 
+    history = [];
+    gameOver = false;
+    currentPlayer = 1;
+    isAIThinking = false;
+    gameMode = modeSelect.value;
+    updateDepth(); 
+    progressContainer.style.display = 'none';
+    
+    document.getElementById('undoBtn').disabled = false;
+    statusDiv.style.color = "#333";
+    statusDiv.textContent = "請黑棋先手落子 (第一手需在正中央)...";
+    drawBoard();
+    
+    if (gameMode === 'avp') setTimeout(checkTurn, 100);
+}
+
+function changeMode() {
+    if (isAIThinking) return;
+    init();
+}
+
+function drawBoard() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < size; i++) {
+        ctx.beginPath();
+        ctx.moveTo(cellSize / 2, cellSize / 2 + i * cellSize);
+        ctx.lineTo(canvas.width - cellSize / 2, cellSize / 2 + i * cellSize);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cellSize / 2 + i * cellSize, cellSize / 2);
+        ctx.lineTo(cellSize / 2 + i * cellSize, canvas.height - cellSize / 2);
+        ctx.stroke();
+    }
+    const stars = [3, 7, 11];
+    ctx.fillStyle = '#000';
+    for (let x of stars) {
+        for (let y of stars) {
+            ctx.beginPath();
+            ctx.arc(cellSize / 2 + x * cellSize, cellSize / 2 + y * cellSize, 4, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+    }
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y++) {
+            if (board[x + y * size] !== 0) drawStone(x, y, board[x + y * size]);
+        }
+    }
+    if (history.length > 0) {
+        const last = history[history.length - 1];
+        ctx.fillStyle = board[last.x + last.y * size] === 1 ? 'white' : 'red';
+        ctx.beginPath();
+        ctx.arc(cellSize / 2 + last.x * cellSize, cellSize / 2 + last.y * cellSize, 3, 0, 2 * Math.PI);
+        ctx.fill();
+    }
+}
+
+function drawStone(x, y, player) {
+    const px = cellSize / 2 + x * cellSize;
+    const py = cellSize / 2 + y * cellSize;
+    const r = cellSize / 2 - 4;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, 2 * Math.PI);
+    const g = ctx.createRadialGradient(px - 2, py - 2, r / 3, px, py, r);
+    if (player === 1) {
+        g.addColorStop(0, '#666');
+        g.addColorStop(1, '#000');
+    } else {
+        g.addColorStop(0, '#fff');
+        g.addColorStop(1, '#ccc');
+    }
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = '#333';
+    ctx.stroke();
+}
+
+canvas.addEventListener('click', e => {
+    if (gameOver || isAIThinking) return;
+    let isPlayerTurn = true;
+    if (gameMode === 'pva' && currentPlayer === 2) isPlayerTurn = false;
+    if (gameMode === 'avp' && currentPlayer === 1) isPlayerTurn = false;
+    if (!isPlayerTurn) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / (rect.width / size));
+    const y = Math.floor((e.clientY - rect.top) / (rect.height / size));
+    processMove(x, y);
+});
+
+function processMove(x, y) {
+    if (x < 0 || x >= size || y < 0 || y >= size || board[x + y * size] !== 0) return false;
+    
+    if (history.length === 0 && (x !== 7 || y !== 7)) {
+        if (!isAIThinking) {
+            statusDiv.style.color = "#d93025";
+            statusDiv.textContent = "⚠️ 開局限制：第一手必須下在正中央（天元）！";
+        }
+        return false;
+    }
+    board[x + y * size] = currentPlayer;
+    if (currentPlayer === 1) {
+        if (checkWin(board, x, y, 1)) {
+            history.push({x, y}); finishGame("⚫ 黑棋 獲勝！"); return true;
+        }
+        const forbidden = checkForbidden(board, x, y);
+        if (forbidden) {
+            board[x + y * size] = 0; 
+            if (!isAIThinking) {
+                statusDiv.style.color = "#d93025";
+                statusDiv.textContent = `⚠️ 禁手：${forbidden}，此點無法落子！`;
+            }
+            return false;
+        }
+    } else {
+        if (checkWin(board, x, y, 2)) {
+            history.push({x, y}); finishGame("⚪ 白棋 獲勝！"); return true;
+        }
+    }
+    
+    history.push({x, y});
+    currentPlayer = 3 - currentPlayer;
+    drawBoard();
+    
+    if (!gameOver) {
+        statusDiv.style.color = "#333";
+        statusDiv.textContent = `輪到 ${(currentPlayer === 1 ? "⚫ 黑棋" : "⚪ 白棋")} 落子`;
+        checkTurn();
+    }
+    return true;
+}
+
+function checkTurn() {
+    if (gameOver) return;
+    let isAITurn = false;
+    if (gameMode === 'pva' && currentPlayer === 2) isAITurn = true;
+    if (gameMode === 'avp' && currentPlayer === 1) isAITurn = true;
+    if (isAITurn) triggerAIWorker();
+}
+
+function triggerAIWorker() {
+    isAIThinking = true;
+    document.getElementById('undoBtn').disabled = true;
+    modeSelect.disabled = true;
+    depthInput.disabled = true;
+    updateDepth(); 
+    
+    statusDiv.style.color = "#1e8e3e";
+    statusDiv.textContent = `🤖 AI 啟發式運算中 (深度 ${aiSearchDepth})...`;
+    
+    let aiPlayerId = currentPlayer;
+    let opponentId = 3 - aiPlayerId;
+    
+    // 主執行緒先產生候選步並初步排序，放寬至 24 步
+    let candidates = generateCandidateMoves(board, aiPlayerId);
+    if (aiPlayerId === 1) {
+        candidates = candidates.filter(m => !checkForbidden(board, m.x, m.y));
+    }
+
+    // 檢查是否有秒殺或秒擋
+    for (let move of candidates) {
+        board[move.x + move.y * size] = aiPlayerId;
+        if (checkWin(board, move.x, move.y, aiPlayerId)) { board[move.x + move.y * size] = 0; applyAIMove(move); return; }
+        board[move.x + move.y * size] = 0;
+    }
+    let blockMove = null;
+    for (let move of candidates) {
+        board[move.x + move.y * size] = opponentId;
+        if (checkWin(board, move.x, move.y, opponentId)) { blockMove = move; }
+        board[move.x + move.y * size] = 0;
+        if (blockMove) { applyAIMove(blockMove); return; }
+    }
+
+    if (candidates.length === 0) {
+        applyAIMove(null);
+        return;
+    }
+
+    progressContainer.style.display = 'block';
+    progressBar.style.width = '0%';
+    totalMovesToProcess = candidates.length;
+    processedMovesCount = 0;
+    
+    const fullWorkerCode = document.getElementById('aiCoreCode').textContent + "\n" + document.getElementById('aiWorkerWrapper').textContent;
+    const workerBlob = new Blob([fullWorkerCode], { type: "text/javascript" });
+    const workerUrl = URL.createObjectURL(workerBlob);
+
+    let sharedBuffer = null;
+    let effectiveCores = 1;
+    if (hasSharedMemory) {
+        sharedBuffer = new SharedArrayBuffer(4);
+        const sharedData = new Int32Array(sharedBuffer);
+        sharedData[0] = MIN_INF;
+        effectiveCores = maxCores;
+    }
+
+    const chunks = [];
+    for (let i = 0; i < effectiveCores; i++) chunks.push([]);
+    candidates.forEach((move, index) => {
+        chunks[index % effectiveCores].push(move);
+    });
+
+    let bestGlobalMove = null;
+    let maxGlobalEval = -Infinity;
+    let completedWorkers = 0;
+    let actualWorkersUsed = 0;
+    activeWorkers = [];
+
+    chunks.forEach(chunk => {
+        if (chunk.length === 0) return;
+        actualWorkersUsed++;
+        
+        const worker = new Worker(workerUrl);
+        activeWorkers.push(worker);
+        
+        worker.onmessage = function(e) {
+            if (e.data.type === 'progress') {
+                processedMovesCount++;
+                progressBar.style.width = `${(processedMovesCount / totalMovesToProcess) * 100}%`;
+            } else if (e.data.type === 'done') {
+                completedWorkers++;
+                if (e.data.bestMove && e.data.maxEval > maxGlobalEval) {
+                    maxGlobalEval = e.data.maxEval;
+                    bestGlobalMove = e.data.bestMove;
+                }
+                if (completedWorkers === actualWorkersUsed) {
+                    activeWorkers.forEach(w => w.terminate()); 
+                    URL.revokeObjectURL(workerUrl);
+                    applyAIMove(bestGlobalMove || candidates[0]);
+                }
+            }
+        };
+
+        worker.postMessage({
+            boardData: board.buffer, 
+            moves: chunk,
+            targetDepth: aiSearchDepth,
+            aiPlayerId: aiPlayerId,
+            sharedBuffer: sharedBuffer 
+        });
+    });
+}
+
+function applyAIMove(bestMove) {
+    progressContainer.style.display = 'none';
+    isAIThinking = false;
+    document.getElementById('undoBtn').disabled = false;
+    modeSelect.disabled = false;
+    depthInput.disabled = false;
+    
+    if (bestMove) {
+        processMove(bestMove.x, bestMove.y);
+    } else {
+        statusDiv.style.color = "#d93025";
+        statusDiv.textContent = "🏳️ AI 認輸或無合法位置可下！";
+        gameOver = true;
+    }
+}
+
+function finishGame(msg) {
+    gameOver = true;
+    drawBoard();
+    statusDiv.style.color = "#1e8e3e";
+    statusDiv.textContent = msg;
+}
+
+function undoMove() {
+    if (history.length === 0 || isAIThinking) return;
+    if (gameOver) gameOver = false;
+    let last = history.pop();
+    let lastPlayerId = board[last.x + last.y * size];
+    board[last.x + last.y * size] = 0;
+    if (gameMode !== 'pvp' && history.length > 0) {
+        let aiPlayerId = gameMode === 'pva' ? 2 : 1;
+        if (lastPlayerId === aiPlayerId) {
+            let prev = history.pop();
+            board[prev.x + prev.y * size] = 0;
+        }
+    }
+    currentPlayer = (history.length % 2 === 0) ? 1 : 2;
+    statusDiv.style.color = "#333";
+    statusDiv.textContent = `已悔棋，輪到 ${(currentPlayer === 1 ? "⚫ 黑棋" : "⚪ 白棋")} 落子`;
+    drawBoard();
+    if (history.length === 0 && gameMode === 'avp') checkTurn();
+}
+
+function restartGame() {
+    if(isAIThinking) {
+        activeWorkers.forEach(w => w.terminate());
+        activeWorkers = [];
+    }
+    init();
+}
+
+init();
+</script>
+</body>
+</html>
