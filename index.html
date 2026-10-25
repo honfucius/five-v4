@@ -1,295 +1,736 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>網頁原始碼檢視器 (手機版)</title>
-    
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-okaidia.min.css" rel="stylesheet" />
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css" rel="stylesheet" />
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>11x11 納許棋 (Perfectly Centered AI)</title>
+<style>
+body {
+    margin: 0;
+    font-family: 'Segoe UI', sans-serif;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+    background: linear-gradient(to bottom, #f8f8f8, #e0e0e0);
+    position: relative;
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+h2 { font-size: 2em; margin: 10px 0; color: #222; text-shadow: 1px 1px 2px #aaa; }
+#status { font-size: 1.2em; font-weight: bold; margin-bottom: 5px; min-height: 28px; color: #d93025; }
+#coreInfo { font-size: 0.9em; color: #1e8e3e; font-weight: bold; margin-bottom: 10px; }
 
-    <style>
-        /* 全域設定 */
-        * {
-            box-sizing: border-box; /* 確保寬度計算包含邊框 */
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: #121212; /* 深色模式背景 */
-            margin: 0;
-            padding: 0;
-            color: #eee;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
+/* 深度設定 UI */
+.depth-setting {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    background: white;
+    padding: 8px 12px;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: bold;
+    color: #333;
+    z-index: 10;
+}
+.depth-setting input { width: 45px; padding: 4px; border: 1px solid #aaa; border-radius: 4px; font-size: 1em; text-align: center; }
 
-        /* 主容器 */
-        .container {
-            width: 100%;
-            max-width: 900px;
-            background: #1e1e1e;
-            padding: 1rem;
-            display: flex;
-            flex-direction: column;
-            height: 100vh; /* 手機版佔滿全螢幕 */
-        }
+/* 控制區與進度條 */
+.controls { margin-bottom: 10px; display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; max-width: 500px; }
+.btn-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+select, button { padding: 8px 14px; font-size: 1em; border-radius: 6px; cursor: pointer; border: 1px solid #555; }
+button { background-color: #555; color: white; transition: .3s; border: none; }
+button:hover { background-color: #222; }
+button:disabled { background-color: #999; cursor: not-allowed; }
 
-        /* 標題 */
-        h2 {
-            text-align: center;
-            font-size: 1.2rem;
-            margin: 10px 0 15px 0;
-            color: #fff;
-        }
+#progressContainer { display: none; width: 100%; background: #ddd; border-radius: 8px; overflow: hidden; height: 16px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.2); }
+#progressBar { width: 0%; height: 100%; background: #1e8e3e; transition: width 0.1s linear; }
 
-        /* 輸入區塊 (Flexbox) */
-        .input-group {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
-            flex-wrap: wrap; /* 允許換行 */
-        }
-        
-        input[type="text"] {
-            flex: 1; /* 佔滿剩餘空間 */
-            min-width: 200px; /* 最小寬度 */
-            padding: 12px;
-            background: #2d2d2d;
-            border: 1px solid #444;
-            color: white;
-            border-radius: 8px;
-            font-size: 16px; /* 防止 iOS 自動縮放輸入框 */
-            outline: none;
-            -webkit-appearance: none; /* 移除 iOS 預設陰影 */
-        }
-        
-        input[type="text"]:focus {
-            border-color: #4caf50;
-        }
+/* 畫布設定 */
+canvas {
+    max-width: 100%;
+    height: auto;
+    touch-action: none;
+    cursor: pointer;
+    background: transparent;
+    display: block;
+    margin: 0 auto;
+}
 
-        button {
-            padding: 12px 20px;
-            background-color: #2e7d32;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            white-space: nowrap;
-            /* 手機優化：按鈕稍微大一點 */
-            touch-action: manipulation; 
-        }
-        
-        button:active {
-            background-color: #1b5e20;
-            transform: scale(0.98);
-        }
-        button:disabled {
-            background-color: #555;
-            color: #888;
-        }
+/* 規則區 */
+.rules { max-width: 600px; text-align: left; background: white; padding: 15px 25px; border-radius: 8px; margin-top: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); line-height: 1.5; }
+.rules h3 { margin-top: 0; color: #333; border-bottom: 2px solid #ddd; padding-bottom: 5px; }
+.rules ul { margin: 10px 0; padding-left: 20px; }
 
-        /* 進度條 */
-        .progress-container {
-            width: 100%;
-            background-color: #333;
-            border-radius: 4px;
-            height: 4px;
-            margin-bottom: 10px;
-            overflow: hidden;
-            display: none;
-        }
-        .progress-bar {
-            height: 100%;
-            width: 0%;
-            background: #4caf50;
-            transition: width 0.2s;
-        }
-
-        /* 狀態列 */
-        .status-bar {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.85rem;
-            color: #aaa;
-            margin-bottom: 8px;
-            padding: 0 5px;
-        }
-
-        /* 程式碼視窗 */
-        .code-window {
-            flex: 1; /* 自動填滿剩下的垂直空間 */
-            position: relative;
-            overflow: auto; /* 允許捲動 */
-            border-radius: 8px;
-            border: 1px solid #333;
-            background-color: #272822; /* Okaidia 背景色 */
-            -webkit-overflow-scrolling: touch; /* 讓 iOS 捲動更滑順 */
-        }
-
-        /* 針對手機的小螢幕優化 (RWD) */
-        @media (max-width: 600px) {
-            .container {
-                height: 100vh; /* 確保佔滿視窗 */
-                padding: 10px;
-            }
-            .input-group {
-                flex-direction: column; /* 上下排列 */
-                gap: 8px;
-            }
-            button {
-                width: 100%; /* 按鈕變全寬，方便手指點擊 */
-                padding: 14px;
-            }
-            input[type="text"] {
-                padding: 14px;
-            }
-            h2 {
-                font-size: 1.1rem;
-                margin-bottom: 10px;
-            }
-        }
-    </style>
+@media (max-width: 600px) {
+    .depth-setting { position: relative; top: 0; right: 0; margin-bottom: 10px; }
+}
+</style>
 </head>
 <body>
 
-<div class="container">
-    <h2>📱 原始碼檢視器 <span style="font-size:0.7em; color:#4caf50">Mobile</span></h2>
-    
-    <div class="input-group">
-        <input type="text" id="urlInput" placeholder="輸入網址 (例如 google.com)" inputmode="url">
-        <button id="fetchBtn" onclick="startFetch()">取得原始碼</button>
-    </div>
+<div class="depth-setting">
+    <label for="depthInput">🧠 AI 深度:</label>
+    <input type="number" id="depthInput" value="7" min="1" max="20" onchange="updateDepth()">
+</div>
 
-    <div class="progress-container" id="progressContainer">
-        <div class="progress-bar" id="progressBar"></div>
-    </div>
+<h2>🎯 11x11 納許棋 (Nash Hex)</h2>
+<div id="status">🔴 紅棋先手 (1/1 子)</div>
+<div id="coreInfo"></div>
 
-    <div class="status-bar">
-        <span id="statusMsg">等待輸入...</span>
-        <span id="percentText"></span>
+<div class="controls">
+    <div class="btn-group">
+        <select id="modeSelect" onchange="changeMode()">
+            <option value="pve">玩家 (紅) vs AI (藍)</option>
+            <option value="evp">AI (紅) vs 玩家 (藍)</option>
+            <option value="pvp">玩家 vs 玩家</option>
+        </select>
+        <button onclick="restartGame()">🔁 重新開始</button>
+        <button onclick="undoMove()" id="undoBtn">🔙 悔棋</button>
     </div>
-
-    <div class="code-window">
-        <pre class="line-numbers"><code id="codeOutput" class="language-html">
-</code></pre>
+    <div id="progressContainer">
+        <div id="progressBar"></div>
     </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+<canvas id="gameCanvas" width="900" height="700"></canvas>
 
-<script>
-    // 監聽 Enter 鍵
-    document.getElementById('urlInput').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') startFetch();
-    });
+<div class="rules">
+    <h3>📝 規則與系統說明</h3>
+    <ul>
+        <li><strong>勝負條件：</strong>紅棋需連接上下邊界，藍棋需連接左右邊界。</li>
+        <li><strong>落子規則：</strong>採 1-2-2-2-2 制。首回合紅棋下 1 子，之後雙方每回合皆下 2 子。</li>
+        <li><strong>精準置中：</strong>棋盤透過嚴謹的數學公式，完美置中於畫布內。</li>
+        <li><strong>全域同步剪枝：</strong>結合 Web Workers 與 SharedArrayBuffer 的 Alpha-Beta 剪枝，多核極速運算。若無標頭則自動降級。</li>
+    </ul>
+</div>
 
-    let progressInterval = null;
+<!-- 核心演算法 (標準腳本執行，供主執行緒使用) -->
+<script id="hexCoreLogic">
+const SIZE = 11;
 
-    async function startFetch() {
-        const urlInput = document.getElementById('urlInput');
-        const codeBlock = document.getElementById('codeOutput');
-        const btn = document.getElementById('fetchBtn');
-        const status = document.getElementById('statusMsg');
-        const pContainer = document.getElementById('progressContainer');
-        const pBar = document.getElementById('progressBar');
-        const pText = document.getElementById('percentText');
-        
-        let targetUrl = urlInput.value.trim();
-
-        // 收起手機鍵盤 (UX 優化)
-        urlInput.blur();
-
-        if (!targetUrl) {
-            status.textContent = "❌ 請輸入網址";
-            status.style.color = "#ff6b6b";
-            return;
-        }
-        if (!/^https?:\/\//i.test(targetUrl)) {
-            targetUrl = 'https://' + targetUrl;
-            urlInput.value = targetUrl;
-        }
-
-        // 初始化
-        btn.disabled = true;
-        btn.textContent = "讀取中...";
-        codeBlock.textContent = "正在連線...";
-        status.textContent = "正在下載...";
-        status.style.color = "#a5d6ff";
-        
-        pContainer.style.display = "block";
-        pBar.style.width = "5%";
-        pText.textContent = "5%";
-        
-        // 模擬進度條
-        let currentProgress = 5;
-        clearInterval(progressInterval);
-        progressInterval = setInterval(() => {
-            if (currentProgress < 90) {
-                // 隨機增加進度，讓感覺更自然
-                currentProgress += Math.random() * 8;
-                if(currentProgress > 90) currentProgress = 90;
-                pBar.style.width = currentProgress + "%";
-                pText.textContent = Math.round(currentProgress) + "%";
-            }
-        }, 150);
-
-        try {
-            const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-            // 設定 timeout 防止手機網路太慢卡死
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15秒超時
-
-            const response = await fetch(proxyUrl, { signal: controller.signal });
-            clearTimeout(timeoutId);
-            
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            
-            const text = await response.text();
-
-            // 完成
-            clearInterval(progressInterval);
-            pBar.style.width = "100%";
-            pText.textContent = "100%";
-            status.textContent = "✅ 處理語法高亮中...";
-            
-            // 寫入並渲染
-            codeBlock.textContent = text;
-            Prism.highlightElement(codeBlock);
-
-            status.textContent = `✅ 成功 (共 ${text.length} 字元)`;
-            status.style.color = "#4caf50";
-            
-            // 手機版提示滑動
-            if(window.innerWidth < 600) {
-                 status.textContent += " (可左右滑動查看)";
-            }
-
-        } catch (error) {
-            clearInterval(progressInterval);
-            pBar.style.backgroundColor = "#ff6b6b";
-            let errorMsg = error.message;
-            if (error.name === 'AbortError') errorMsg = "連線逾時，請檢查網路";
-            
-            status.textContent = `❌ ${errorMsg}`;
-            status.style.color = "#ff6b6b";
-            codeBlock.textContent = "讀取失敗。\n\n常見原因：\n1. 網址輸入錯誤\n2. 該網站封鎖代理訪問 (如 FB/Google)\n3. 手機網路不穩";
-        } finally {
-            btn.disabled = false;
-            btn.textContent = "取得原始碼";
-            setTimeout(() => {
-                pContainer.style.display = "none";
-                pText.textContent = "";
-                // 重置進度條顏色
-                pBar.style.backgroundColor = "#4caf50"; 
-            }, 3000);
+function getNeighbors(index) {
+    const r = Math.floor(index / SIZE);
+    const c = index % SIZE;
+    const neighbors = [];
+    const dirs = [
+        [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0]
+    ];
+    for (let d of dirs) {
+        const nr = r + d[0], nc = c + d[1];
+        if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE) {
+            neighbors.push(nr * SIZE + nc);
         }
     }
+    return neighbors;
+}
+
+function checkWinState(tempBoard, player) {
+    const visited = new Uint8Array(SIZE * SIZE);
+    const queue = [];
+    
+    for (let i = 0; i < SIZE; i++) {
+        let idx = player === 1 ? i : i * SIZE; // 紅(1)上邊，藍(2)左邊
+        if (tempBoard[idx] === player) {
+            queue.push(idx);
+            visited[idx] = 1;
+        }
+    }
+
+    let head = 0;
+    while (head < queue.length) {
+        let curr = queue[head++];
+        let r = Math.floor(curr / SIZE);
+        let c = curr % SIZE;
+        
+        if (player === 1 && r === SIZE - 1) return true;
+        if (player === 2 && c === SIZE - 1) return true;
+
+        for (let n of getNeighbors(curr)) {
+            if (tempBoard[n] === player && !visited[n]) {
+                visited[n] = 1;
+                queue.push(n);
+            }
+        }
+    }
+    return false;
+}
+
+function bfsShortestPath(tempBoard, player) {
+    const dist = new Int32Array(SIZE * SIZE).fill(9999);
+    const deque = [];
+
+    for (let i = 0; i < SIZE; i++) {
+        let idx = player === 1 ? i : i * SIZE;
+        if (tempBoard[idx] === player) {
+            dist[idx] = 0;
+            deque.unshift(idx);
+        } else if (tempBoard[idx] === 0) {
+            dist[idx] = 1;
+            deque.push(idx);
+        }
+    }
+
+    while (deque.length > 0) {
+        let curr = deque.shift();
+        let r = Math.floor(curr / SIZE);
+        let c = curr % SIZE;
+
+        if (player === 1 && r === SIZE - 1) return dist[curr];
+        if (player === 2 && c === SIZE - 1) return dist[curr];
+
+        for (let n of getNeighbors(curr)) {
+            let weight = tempBoard[n] === player ? 0 : (tempBoard[n] === 0 ? 1 : 9999);
+            if (weight === 9999) continue;
+            
+            if (dist[curr] + weight < dist[n]) {
+                dist[n] = dist[curr] + weight;
+                if (weight === 0) deque.unshift(n);
+                else deque.push(n);
+            }
+        }
+    }
+    return 9999;
+}
+
+function evaluateBoardScore(tempBoard, aiPlayerId) {
+    let opponentId = 3 - aiPlayerId;
+    let aiDist = bfsShortestPath(tempBoard, aiPlayerId);
+    let oppDist = bfsShortestPath(tempBoard, opponentId);
+    
+    if (aiDist === 0) return 1000000;
+    if (oppDist === 0) return -1000000;
+    
+    return (oppDist * 10) - (aiDist * 12);
+}
+
+function generateCandidates(tempBoard, currentPlayer) {
+    let moves = [];
+    for (let i = 0; i < SIZE * SIZE; i++) {
+        if (tempBoard[i] === 0) {
+            tempBoard[i] = currentPlayer;
+            let score = evaluateBoardScore(tempBoard, currentPlayer);
+            tempBoard[i] = 0;
+            moves.push({ index: i, score: score });
+        }
+    }
+    return moves.sort((a, b) => b.score - a.score).slice(0, 12).map(m => m.index);
+}
 </script>
 
+<!-- Worker 腳本 (處理 Minimax 與 Alpha-Beta 剪枝) -->
+<script id="aiWorkerCode" type="javascript/worker">
+function minimax(tempBoard, depth, alpha, beta, isMaximizing, aiPlayerId, piecesPlaced, piecesAllowed) {
+    let aiWin = checkWinState(tempBoard, aiPlayerId);
+    let oppWin = checkWinState(tempBoard, 3 - aiPlayerId);
+    
+    if (aiWin) return 1000000 + depth;
+    if (oppWin) return -1000000 - depth;
+    if (depth === 0) return evaluateBoardScore(tempBoard, aiPlayerId);
+
+    let currentPlayer = isMaximizing ? aiPlayerId : (3 - aiPlayerId);
+    let candidates = generateCandidates(tempBoard, currentPlayer);
+    
+    if (candidates.length === 0) return evaluateBoardScore(tempBoard, aiPlayerId);
+
+    let bestEval = isMaximizing ? -Infinity : Infinity;
+
+    for (let i = 0; i < candidates.length; i++) {
+        let move = candidates[i];
+        tempBoard[move] = currentPlayer;
+        
+        let nextPlaced = piecesPlaced + 1;
+        let nextAllowed = piecesAllowed;
+        let nextIsMaximizing = isMaximizing;
+
+        if (nextPlaced === nextAllowed) {
+            nextIsMaximizing = !isMaximizing;
+            nextPlaced = 0;
+            nextAllowed = 2; 
+        }
+
+        let ev = minimax(tempBoard, depth - 1, alpha, beta, nextIsMaximizing, aiPlayerId, nextPlaced, nextAllowed);
+        tempBoard[move] = 0;
+
+        if (isMaximizing) {
+            bestEval = Math.max(bestEval, ev);
+            alpha = Math.max(alpha, ev);
+        } else {
+            bestEval = Math.min(bestEval, ev);
+            beta = Math.min(beta, ev);
+        }
+        if (beta <= alpha) break; 
+    }
+    return bestEval;
+}
+
+self.onmessage = function(e) {
+    const { boardData, moves, depth, aiPlayerId, piecesPlaced, piecesAllowed, sharedBuffer } = e.data;
+    const board = new Uint8Array(boardData);
+    
+    let sharedAlpha = null;
+    if (sharedBuffer) {
+        sharedAlpha = new Int32Array(sharedBuffer);
+    }
+
+    let bestMove = null;
+    let maxEval = -Infinity;
+    
+    for (let i = 0; i < moves.length; i++) {
+        let move = moves[i];
+        
+        let initialAlpha = -Infinity;
+        if (sharedAlpha) {
+            let currentGlobalAlpha = Atomics.load(sharedAlpha, 0);
+            initialAlpha = Math.max(-Infinity, currentGlobalAlpha);
+        }
+
+        board[move] = aiPlayerId;
+        
+        let nextPlaced = piecesPlaced + 1;
+        let nextAllowed = piecesAllowed;
+        let nextIsMaximizing = true; 
+        
+        if (nextPlaced === nextAllowed) {
+            nextIsMaximizing = false;
+            nextPlaced = 0;
+            nextAllowed = 2;
+        }
+
+        let evalScore = minimax(board, depth - 1, initialAlpha, Infinity, nextIsMaximizing, aiPlayerId, nextPlaced, nextAllowed);
+        board[move] = 0;
+        
+        if (evalScore > maxEval) {
+            maxEval = evalScore;
+            bestMove = move;
+            
+            if (sharedAlpha) {
+                let expectedAlpha = Atomics.load(sharedAlpha, 0);
+                while (evalScore > expectedAlpha) {
+                    let actual = Atomics.compareExchange(sharedAlpha, 0, expectedAlpha, evalScore);
+                    if (actual === expectedAlpha) break;
+                    expectedAlpha = actual;
+                }
+            }
+        }
+        self.postMessage({ type: 'progress' });
+    }
+    self.postMessage({ type: 'done', bestMove: bestMove, maxEval: maxEval });
+};
+</script>
+
+<!-- 主程式 UI 互動與繪圖邏輯 -->
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const statusDiv = document.getElementById('status');
+const coreInfoDiv = document.getElementById('coreInfo');
+const undoBtn = document.getElementById('undoBtn');
+const progressContainer = document.getElementById('progressContainer');
+const progressBar = document.getElementById('progressBar');
+const depthInput = document.getElementById('depthInput');
+
+// ==========================================
+// PERFECT CENTERING CALCULATIONS
+// ==========================================
+const HEX_RADIUS = 26; 
+const HEX_WIDTH = Math.sqrt(3) * HEX_RADIUS;
+const HEX_HEIGHT = 2 * HEX_RADIUS;
+
+// Total exact dimensions of the 11x11 hexagonal bounding box
+const TOTAL_WIDTH = SIZE * HEX_WIDTH + (SIZE - 1) * (HEX_WIDTH / 2);
+const TOTAL_HEIGHT = SIZE * HEX_HEIGHT * 0.75 + HEX_HEIGHT * 0.25;
+
+// Calculating offsets to perfectly center the entire grid within the canvas
+const X_OFFSET = (canvas.width - TOTAL_WIDTH) / 2 + (HEX_WIDTH / 2);
+const Y_OFFSET = (canvas.height - TOTAL_HEIGHT) / 2 + (HEX_HEIGHT / 2);
+// ==========================================
+
+let board = new Uint8Array(SIZE * SIZE);
+let history = []; 
+let currentPlayer = 1; 
+let piecesPlacedThisTurn = 0;
+let piecesAllowedThisTurn = 1; 
+let gameOver = false;
+let gameMode = 'pve';
+let isAIThinking = false;
+let aiSearchDepth = 3;
+let aiDelayTimeout = null;
+
+// 多核設定
+let hasSharedMemory = typeof SharedArrayBuffer !== 'undefined';
+const maxCores = navigator.hardwareConcurrency || 4;
+let activeWorkers = [];
+let totalMovesToProcess = 0;
+let processedMovesCount = 0;
+
+if (hasSharedMemory) {
+    coreInfoDiv.textContent = `⚡ Atomics 同步啟動：完美調用 ${maxCores} 核心分工`;
+} else {
+    coreInfoDiv.style.color = "#d93025";
+    coreInfoDiv.innerHTML = `⚠️ 伺服器缺少 COOP/COEP 標頭，安全退回單核降級模式。`;
+}
+
+function getHexCenter(r, c) {
+    const x = X_OFFSET + c * HEX_WIDTH + r * (HEX_WIDTH / 2);
+    const y = Y_OFFSET + r * (HEX_HEIGHT * 0.75);
+    return { x, y };
+}
+
+// 取得六邊形頂點 (0:右上方, 順時針旋轉)
+function getHexVertices(cx, cy, radius) {
+    const vertices = [];
+    for (let i = 0; i < 6; i++) {
+        const angle_deg = 60 * i - 30;
+        const angle_rad = Math.PI / 180 * angle_deg;
+        vertices.push({ x: cx + radius * Math.cos(angle_rad), y: cy + radius * Math.sin(angle_rad) });
+    }
+    return vertices;
+}
+
+function drawHexagon(r, c, fillStyle, hasShadow = false) {
+    const { x, y } = getHexCenter(r, c);
+    const vertices = getHexVertices(x, y, HEX_RADIUS);
+
+    ctx.beginPath();
+    ctx.moveTo(vertices[0].x, vertices[0].y);
+    for (let i = 1; i < 6; i++) ctx.lineTo(vertices[i].x, vertices[i].y);
+    ctx.closePath();
+
+    if (hasShadow) {
+        ctx.shadowColor = 'rgba(0,0,0,0.4)';
+        ctx.shadowBlur = 6;
+        ctx.shadowOffsetX = 2;
+        ctx.shadowOffsetY = 4;
+    } else {
+        ctx.shadowColor = 'transparent';
+    }
+
+    ctx.fillStyle = fillStyle;
+    ctx.fill();
+    ctx.shadowColor = 'transparent'; 
+    ctx.strokeStyle = '#a67c52';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+}
+
+function drawPieces() {
+    for (let i = 0; i < SIZE * SIZE; i++) {
+        if (board[i] !== 0) {
+            let r = Math.floor(i / SIZE);
+            let c = i % SIZE;
+            const { x, y } = getHexCenter(r, c);
+            const vertices = getHexVertices(x, y, HEX_RADIUS);
+            
+            ctx.beginPath();
+            ctx.moveTo(vertices[0].x, vertices[0].y);
+            for (let v = 1; v < 6; v++) ctx.lineTo(vertices[v].x, vertices[v].y);
+            ctx.closePath();
+
+            const gradient = ctx.createRadialGradient(x - 5, y - 5, 2, x, y, HEX_RADIUS);
+            if (board[i] === 1) {
+                gradient.addColorStop(0, '#ff6b6b');
+                gradient.addColorStop(1, '#c92a2a');
+            } else {
+                gradient.addColorStop(0, '#4dabf7');
+                gradient.addColorStop(1, '#1864ab');
+            }
+            
+            ctx.fillStyle = gradient;
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    }
+}
+
+function drawBoundaries() {
+    ctx.lineWidth = 6;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // 紅色邊界 (上: row 0) 
+    ctx.strokeStyle = '#c92a2a';
+    ctx.beginPath();
+    for (let c = 0; c < SIZE; c++) {
+        let v = getHexVertices(getHexCenter(0, c).x, getHexCenter(0, c).y, HEX_RADIUS);
+        if (c === 0) ctx.moveTo(v[4].x, v[4].y);
+        ctx.lineTo(v[5].x, v[5].y); 
+        ctx.lineTo(v[0].x, v[0].y);
+    }
+    ctx.stroke();
+
+    // 紅色邊界 (下: row SIZE-1) 
+    ctx.beginPath();
+    for (let c = 0; c < SIZE; c++) {
+        let v = getHexVertices(getHexCenter(SIZE - 1, c).x, getHexCenter(SIZE - 1, c).y, HEX_RADIUS);
+        if (c === 0) ctx.moveTo(v[3].x, v[3].y);
+        ctx.lineTo(v[2].x, v[2].y); 
+        ctx.lineTo(v[1].x, v[1].y);
+    }
+    ctx.stroke();
+
+    // 藍色邊界 (左: col 0) 
+    ctx.strokeStyle = '#1864ab';
+    ctx.beginPath();
+    for (let r = 0; r < SIZE; r++) {
+        let v = getHexVertices(getHexCenter(r, 0).x, getHexCenter(r, 0).y, HEX_RADIUS);
+        if (r === 0) ctx.moveTo(v[4].x, v[4].y);
+        ctx.lineTo(v[3].x, v[3].y); 
+        ctx.lineTo(v[2].x, v[2].y);
+    }
+    ctx.stroke();
+
+    // 藍色邊界 (右: col SIZE-1) 
+    ctx.beginPath();
+    for (let r = 0; r < SIZE; r++) {
+        let v = getHexVertices(getHexCenter(r, SIZE - 1).x, getHexCenter(r, SIZE - 1).y, HEX_RADIUS);
+        if (r === 0) ctx.moveTo(v[5].x, v[5].y);
+        ctx.lineTo(v[0].x, v[0].y); 
+        ctx.lineTo(v[1].x, v[1].y);
+    }
+    ctx.stroke();
+}
+
+function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let r = 0; r < SIZE; r++) {
+        for (let c = 0; c < SIZE; c++) drawHexagon(r, c, '#f9d18c', true);
+    }
+    drawPieces();
+    drawBoundaries();
+}
+
+function updateStatus() {
+    if (gameOver) return;
+    const pName = currentPlayer === 1 ? '🔴 紅棋' : '🔵 藍棋';
+    statusDiv.textContent = `輪到 ${pName} (${piecesPlacedThisTurn + 1}/${piecesAllowedThisTurn} 子)`;
+}
+
+function updateDepth() {
+    let val = parseInt(depthInput.value);
+    if (isNaN(val) || val < 1) val = 1;
+    if (val > 8) val = 8;
+    depthInput.value = val;
+    aiSearchDepth = val;
+}
+
+function processMove(index) {
+    if (board[index] !== 0 || gameOver || isAIThinking) return;
+
+    board[index] = currentPlayer;
+    piecesPlacedThisTurn++;
+    history.push({ index, player: currentPlayer, placed: piecesPlacedThisTurn, allowed: piecesAllowedThisTurn });
+
+    if (checkWinState(board, currentPlayer)) {
+        render();
+        statusDiv.textContent = `🎉 ${(currentPlayer === 1 ? '🔴 紅棋' : '🔵 藍棋')} 獲勝！`;
+        gameOver = true;
+        return;
+    }
+
+    if (piecesPlacedThisTurn >= piecesAllowedThisTurn) {
+        currentPlayer = 3 - currentPlayer;
+        piecesPlacedThisTurn = 0;
+        piecesAllowedThisTurn = 2; 
+    }
+
+    render();
+    updateStatus();
+    checkAITurn();
+}
+
+function undoMove() {
+    if (history.length === 0 || isAIThinking) return;
+    
+    if (aiDelayTimeout) {
+        clearTimeout(aiDelayTimeout);
+        aiDelayTimeout = null;
+    }
+
+    gameOver = false;
+    const lastMove = history.pop();
+    board[lastMove.index] = 0;
+    
+    currentPlayer = lastMove.player;
+    piecesPlacedThisTurn = lastMove.placed - 1;
+    piecesAllowedThisTurn = lastMove.allowed;
+
+    render();
+    updateStatus();
+
+    let isAITurn = (gameMode === 'pve' && currentPlayer === 2) || (gameMode === 'evp' && currentPlayer === 1);
+    if (isAITurn) {
+        statusDiv.textContent = "AI 等待中 (1.5秒內可繼續悔棋)...";
+        aiDelayTimeout = setTimeout(() => checkAITurn(), 1500);
+    }
+}
+
+function checkAITurn() {
+    if (gameOver || history.length === 0 && gameMode === 'pvp') return;
+    let isAITurn = (gameMode === 'pve' && currentPlayer === 2) || (gameMode === 'evp' && currentPlayer === 1);
+    if (isAITurn && !isAIThinking) {
+        triggerAIWorker();
+    }
+}
+
+function triggerAIWorker() {
+    isAIThinking = true;
+    undoBtn.disabled = true;
+    document.getElementById('modeSelect').disabled = true;
+    updateDepth();
+
+    statusDiv.style.color = "#1e8e3e";
+    statusDiv.textContent = `🤖 AI 多核運算中 (深度 ${aiSearchDepth})...`;
+    
+    let candidates = generateCandidates(board, currentPlayer);
+    
+    if (candidates.length === 0) {
+        isAIThinking = false;
+        gameOver = true;
+        statusDiv.textContent = "🏳️ AI 無路可走！";
+        return;
+    }
+
+    progressContainer.style.display = 'block';
+    progressBar.style.width = '0%';
+    totalMovesToProcess = candidates.length;
+    processedMovesCount = 0;
+
+    const fullWorkerCode = document.getElementById('hexCoreLogic').textContent + "\n" + document.getElementById('aiWorkerCode').textContent;
+    const workerBlob = new Blob([fullWorkerCode], { type: "text/javascript" });
+    const workerUrl = URL.createObjectURL(workerBlob);
+
+    let sharedBuffer = null;
+    let effectiveCores = 1;
+    if (hasSharedMemory) {
+        sharedBuffer = new SharedArrayBuffer(4);
+        const sharedData = new Int32Array(sharedBuffer);
+        sharedData[0] = -100000000;
+        effectiveCores = maxCores;
+    }
+
+    const chunks = [];
+    for (let i = 0; i < effectiveCores; i++) chunks.push([]);
+    candidates.forEach((move, index) => {
+        chunks[index % effectiveCores].push(move);
+    });
+
+    let bestGlobalMove = null;
+    let maxGlobalEval = -Infinity;
+    let completedWorkers = 0;
+    let actualWorkersUsed = 0;
+    activeWorkers = [];
+
+    chunks.forEach(chunk => {
+        if (chunk.length === 0) return;
+        actualWorkersUsed++;
+        
+        const worker = new Worker(workerUrl);
+        activeWorkers.push(worker);
+        
+        worker.onmessage = function(e) {
+            if (e.data.type === 'progress') {
+                processedMovesCount++;
+                progressBar.style.width = `${(processedMovesCount / totalMovesToProcess) * 100}%`;
+            } else if (e.data.type === 'done') {
+                completedWorkers++;
+                if (e.data.bestMove !== null && e.data.maxEval > maxGlobalEval) {
+                    maxGlobalEval = e.data.maxEval;
+                    bestGlobalMove = e.data.bestMove;
+                }
+                if (completedWorkers === actualWorkersUsed) {
+                    activeWorkers.forEach(w => w.terminate());
+                    URL.revokeObjectURL(workerUrl);
+                    
+                    progressContainer.style.display = 'none';
+                    isAIThinking = false;
+                    undoBtn.disabled = false;
+                    document.getElementById('modeSelect').disabled = false;
+                    
+                    statusDiv.style.color = "#d93025";
+                    processMove(bestGlobalMove !== null ? bestGlobalMove : candidates[0]);
+                }
+            }
+        };
+
+        worker.postMessage({
+            boardData: board.buffer,
+            moves: chunk,
+            depth: aiSearchDepth,
+            aiPlayerId: currentPlayer,
+            piecesPlaced: piecesPlacedThisTurn,
+            piecesAllowed: piecesAllowedThisTurn,
+            sharedBuffer: sharedBuffer 
+        });
+    });
+}
+
+canvas.addEventListener('click', (e) => {
+    if (gameOver || isAIThinking) return;
+    let isPlayerTurn = (gameMode === 'pve' && currentPlayer === 1) || (gameMode === 'evp' && currentPlayer === 2) || gameMode === 'pvp';
+    if (!isPlayerTurn) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleY;
+
+    for (let r = 0; r < SIZE; r++) {
+        for (let c = 0; c < SIZE; c++) {
+            const { x, y } = getHexCenter(r, c);
+            if (Math.hypot(mx - x, my - y) < HEX_RADIUS * 0.9) {
+                processMove(r * SIZE + c);
+                return;
+            }
+        }
+    }
+});
+
+function init() {
+    board.fill(0);
+    history = [];
+    currentPlayer = 1;
+    piecesPlacedThisTurn = 0;
+    piecesAllowedThisTurn = 1;
+    gameOver = false;
+    isAIThinking = false;
+    if (aiDelayTimeout) clearTimeout(aiDelayTimeout);
+    
+    updateDepth();
+    gameMode = document.getElementById('modeSelect').value;
+    undoBtn.disabled = false;
+    progressContainer.style.display = 'none';
+
+    render();
+    updateStatus();
+
+    if (gameMode === 'evp') {
+        setTimeout(triggerAIWorker, 100);
+    }
+}
+
+function restartGame() {
+    if (isAIThinking) {
+        activeWorkers.forEach(w => w.terminate());
+        activeWorkers = [];
+        isAIThinking = false;
+    }
+    init();
+}
+
+function changeMode() {
+    if (!isAIThinking) init();
+}
+
+init();
+</script>
 </body>
 </html>
