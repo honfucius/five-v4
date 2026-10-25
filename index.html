@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>11x11 納許棋 (Perfectly Centered AI)</title>
+<title>11x11 納許棋 (Hex) - 位元棋盤極速版</title>
 <style>
 body {
     margin: 0;
@@ -57,9 +57,7 @@ canvas {
     height: auto;
     touch-action: none;
     cursor: pointer;
-    background: transparent;
-    display: block;
-    margin: 0 auto;
+    background: transparent; 
 }
 
 /* 規則區 */
@@ -79,8 +77,8 @@ canvas {
     <input type="number" id="depthInput" value="7" min="1" max="20" onchange="updateDepth()">
 </div>
 
-<h2>🎯 11x11 納許棋 (Nash Hex)</h2>
-<div id="status">🔴 紅棋先手 (1/1 子)</div>
+<h2>🎯 11x11 納許棋 (BigInt 位元加速版)</h2>
+<div id="status">紅棋先手 (下 1 子)</div>
 <div id="coreInfo"></div>
 
 <div class="controls">
@@ -98,185 +96,225 @@ canvas {
     </div>
 </div>
 
-<canvas id="gameCanvas" width="900" height="700"></canvas>
+<canvas id="gameCanvas" width="800" height="600"></canvas>
 
 <div class="rules">
     <h3>📝 規則與系統說明</h3>
     <ul>
         <li><strong>勝負條件：</strong>紅棋需連接上下邊界，藍棋需連接左右邊界。</li>
         <li><strong>落子規則：</strong>採 1-2-2-2-2 制。首回合紅棋下 1 子，之後雙方每回合皆下 2 子。</li>
-        <li><strong>精準置中：</strong>棋盤透過嚴謹的數學公式，完美置中於畫布內。</li>
-        <li><strong>全域同步剪枝：</strong>結合 Web Workers 與 SharedArrayBuffer 的 Alpha-Beta 剪枝，多核極速運算。若無標頭則自動降級。</li>
+        <li><strong>位元棋盤 (Bitboards)：</strong>將 121 格壓縮為 BigInt，利用位元平移極速拓展路徑，效能大幅躍升。</li>
+        <li><strong>Zobrist 置換表 (TT)：</strong>每個運算核心內建 52 萬筆快取，透過 64-bit 雜湊記憶曾推演過的盤面，秒殺重複決策分支！</li>
     </ul>
 </div>
 
-<!-- 核心演算法 (標準腳本執行，供主執行緒使用) -->
+<!-- 核心演算法 (主執行緒與 Worker 共用 Bitboards 與 Zobrist 初始化) -->
 <script id="hexCoreLogic">
 const SIZE = 11;
 
-function getNeighbors(index) {
-    const r = Math.floor(index / SIZE);
-    const c = index % SIZE;
-    const neighbors = [];
-    const dirs = [
-        [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0]
-    ];
-    for (let d of dirs) {
-        const nr = r + d[0], nc = c + d[1];
-        if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE) {
-            neighbors.push(nr * SIZE + nc);
-        }
+// 初始化 Bitboard 遮罩
+let NOT_COL_0 = 0n;
+let NOT_COL_10 = 0n;
+let RED_TOP = 0n;
+let RED_BOTTOM = 0n;
+let BLUE_LEFT = 0n;
+let BLUE_RIGHT = 0n;
+let BOARD_MASK = 0n;
+
+for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+        let bit = 1n << BigInt(r * SIZE + c);
+        BOARD_MASK |= bit;
+        if (c !== 0) NOT_COL_0 |= bit;
+        if (c !== SIZE - 1) NOT_COL_10 |= bit;
+        if (r === 0) RED_TOP |= bit;
+        if (r === SIZE - 1) RED_BOTTOM |= bit;
+        if (c === 0) BLUE_LEFT |= bit;
+        if (c === SIZE - 1) BLUE_RIGHT |= bit;
     }
-    return neighbors;
 }
 
-function checkWinState(tempBoard, player) {
-    const visited = new Uint8Array(SIZE * SIZE);
-    const queue = [];
+// 初始化 Zobrist Hash
+const ZOBRIST_PIECES = new BigInt64Array(121 * 2);
+const ZOBRIST_TURN = new BigInt64Array(2 * 3);
+let _seed = 12345;
+function nextRandomBigInt() {
+    _seed ^= _seed << 13; _seed ^= _seed >> 17; _seed ^= _seed << 5;
+    let a = BigInt(_seed >>> 0);
+    _seed ^= _seed << 13; _seed ^= _seed >> 17; _seed ^= _seed << 5;
+    let b = BigInt(_seed >>> 0);
+    return (a << 32n) | b;
+}
+for (let i = 0; i < 242; i++) ZOBRIST_PIECES[i] = nextRandomBigInt();
+for (let i = 0; i < 6; i++) ZOBRIST_TURN[i] = nextRandomBigInt();
+
+// BigInt 相鄰格子拓展
+function getNeighborsBB(x) {
+    return ((x >> 11n) | 
+            (x << 11n) | 
+            ((x >> 10n) & NOT_COL_0) | 
+            ((x << 1n) & NOT_COL_0) | 
+            ((x >> 1n) & NOT_COL_10) | 
+            ((x << 10n) & NOT_COL_10)) & BOARD_MASK;
+}
+
+// 檢查勝負狀態
+function checkWinBB(pieces, player) {
+    let connected = player === 1 ? (pieces & RED_TOP) : (pieces & BLUE_LEFT);
+    if (connected === 0n) return false;
+    let prev = 0n;
+    while (connected !== prev) {
+        prev = connected;
+        connected |= (getNeighborsBB(connected) & pieces);
+    }
+    let target = player === 1 ? RED_BOTTOM : BLUE_RIGHT;
+    return (connected & target) !== 0n;
+}
+
+// 計算最短連通距離
+function getDistanceBB(pieces, emptySpaces, player) {
+    let target = player === 1 ? RED_BOTTOM : BLUE_RIGHT;
+    let reached = 0n;
+    let tier = 0n;
+    let next_tier = player === 1 ? RED_TOP : BLUE_LEFT;
     
-    for (let i = 0; i < SIZE; i++) {
-        let idx = player === 1 ? i : i * SIZE; // 紅(1)上邊，藍(2)左邊
-        if (tempBoard[idx] === player) {
-            queue.push(idx);
-            visited[idx] = 1;
+    for (let d = 0; d < 121; d++) {
+        let changed = true;
+        tier = next_tier;
+        while (changed) {
+            let old = tier;
+            tier |= (getNeighborsBB(tier) & pieces);
+            if (tier === old) changed = false;
         }
-    }
-
-    let head = 0;
-    while (head < queue.length) {
-        let curr = queue[head++];
-        let r = Math.floor(curr / SIZE);
-        let c = curr % SIZE;
-        
-        if (player === 1 && r === SIZE - 1) return true;
-        if (player === 2 && c === SIZE - 1) return true;
-
-        for (let n of getNeighbors(curr)) {
-            if (tempBoard[n] === player && !visited[n]) {
-                visited[n] = 1;
-                queue.push(n);
-            }
-        }
-    }
-    return false;
-}
-
-function bfsShortestPath(tempBoard, player) {
-    const dist = new Int32Array(SIZE * SIZE).fill(9999);
-    const deque = [];
-
-    for (let i = 0; i < SIZE; i++) {
-        let idx = player === 1 ? i : i * SIZE;
-        if (tempBoard[idx] === player) {
-            dist[idx] = 0;
-            deque.unshift(idx);
-        } else if (tempBoard[idx] === 0) {
-            dist[idx] = 1;
-            deque.push(idx);
-        }
-    }
-
-    while (deque.length > 0) {
-        let curr = deque.shift();
-        let r = Math.floor(curr / SIZE);
-        let c = curr % SIZE;
-
-        if (player === 1 && r === SIZE - 1) return dist[curr];
-        if (player === 2 && c === SIZE - 1) return dist[curr];
-
-        for (let n of getNeighbors(curr)) {
-            let weight = tempBoard[n] === player ? 0 : (tempBoard[n] === 0 ? 1 : 9999);
-            if (weight === 9999) continue;
-            
-            if (dist[curr] + weight < dist[n]) {
-                dist[n] = dist[curr] + weight;
-                if (weight === 0) deque.unshift(n);
-                else deque.push(n);
-            }
-        }
+        if ((tier & target) !== 0n) return d;
+        reached |= tier;
+        next_tier = (getNeighborsBB(tier) & emptySpaces) & ~reached;
+        if (next_tier === 0n) break;
     }
     return 9999;
 }
 
-function evaluateBoardScore(tempBoard, aiPlayerId) {
-    let opponentId = 3 - aiPlayerId;
-    let aiDist = bfsShortestPath(tempBoard, aiPlayerId);
-    let oppDist = bfsShortestPath(tempBoard, opponentId);
+// 啟發式評估函數
+function evalBB(red, blue, povPlayer) {
+    let emptySpaces = BOARD_MASK & ~(red | blue);
+    let redDist = getDistanceBB(red, emptySpaces, 1);
+    let blueDist = getDistanceBB(blue, emptySpaces, 2);
     
-    if (aiDist === 0) return 1000000;
-    if (oppDist === 0) return -1000000;
+    if (redDist === 0) return povPlayer === 1 ? 1000000 : -1000000;
+    if (blueDist === 0) return povPlayer === 2 ? 1000000 : -1000000;
     
-    return (oppDist * 10) - (aiDist * 12);
-}
-
-function generateCandidates(tempBoard, currentPlayer) {
-    let moves = [];
-    for (let i = 0; i < SIZE * SIZE; i++) {
-        if (tempBoard[i] === 0) {
-            tempBoard[i] = currentPlayer;
-            let score = evaluateBoardScore(tempBoard, currentPlayer);
-            tempBoard[i] = 0;
-            moves.push({ index: i, score: score });
-        }
-    }
-    return moves.sort((a, b) => b.score - a.score).slice(0, 12).map(m => m.index);
+    return povPlayer === 1 ? (blueDist * 10 - redDist * 12) : (redDist * 10 - blueDist * 12);
 }
 </script>
 
-<!-- Worker 腳本 (處理 Minimax 與 Alpha-Beta 剪枝) -->
+<!-- Worker 腳本 (包含 Transposition Table 與 Alpha-Beta) -->
 <script id="aiWorkerCode" type="javascript/worker">
-function minimax(tempBoard, depth, alpha, beta, isMaximizing, aiPlayerId, piecesPlaced, piecesAllowed) {
-    let aiWin = checkWinState(tempBoard, aiPlayerId);
-    let oppWin = checkWinState(tempBoard, 3 - aiPlayerId);
-    
-    if (aiWin) return 1000000 + depth;
-    if (oppWin) return -1000000 - depth;
-    if (depth === 0) return evaluateBoardScore(tempBoard, aiPlayerId);
+const TT_SIZE = 1 << 19; // 524,288 筆快取
+const TT_MASK = BigInt(TT_SIZE - 1);
+const tt_hash = new BigInt64Array(TT_SIZE);
+const tt_depth = new Int8Array(TT_SIZE);
+const tt_flag = new Uint8Array(TT_SIZE);
+const tt_val = new Int32Array(TT_SIZE);
+const tt_bestMove = new Int8Array(TT_SIZE);
 
-    let currentPlayer = isMaximizing ? aiPlayerId : (3 - aiPlayerId);
-    let candidates = generateCandidates(tempBoard, currentPlayer);
-    
-    if (candidates.length === 0) return evaluateBoardScore(tempBoard, aiPlayerId);
+const EXACT = 1, LOWERBOUND = 2, UPPERBOUND = 3;
 
+function minimax(redPieces, bluePieces, hash, depth, alpha, beta, isMaximizing, currentPlayer, piecesPlaced, piecesAllowed, aiPlayerId) {
+    let ttIndex = Number(hash & TT_MASK);
+    if (tt_hash[ttIndex] === hash && tt_depth[ttIndex] >= depth) {
+        let flag = tt_flag[ttIndex];
+        let val = tt_val[ttIndex];
+        if (flag === EXACT) return val;
+        if (flag === LOWERBOUND && val > alpha) alpha = val;
+        if (flag === UPPERBOUND && val < beta) beta = val;
+        if (alpha >= beta) return val;
+    }
+    
+    let redWin = checkWinBB(redPieces, 1);
+    let blueWin = checkWinBB(bluePieces, 2);
+    if (aiPlayerId === 1 && redWin) return 1000000 + depth;
+    if (aiPlayerId === 2 && blueWin) return 1000000 + depth;
+    if (aiPlayerId === 1 && blueWin) return -1000000 - depth;
+    if (aiPlayerId === 2 && redWin) return -1000000 - depth;
+    
+    if (depth === 0) return evalBB(redPieces, bluePieces, aiPlayerId);
+    
+    let bestMove = -1;
     let bestEval = isMaximizing ? -Infinity : Infinity;
-
-    for (let i = 0; i < candidates.length; i++) {
-        let move = candidates[i];
-        tempBoard[move] = currentPlayer;
+    let origAlpha = alpha;
+    
+    let ttMove = -1;
+    if (tt_hash[ttIndex] === hash) ttMove = tt_bestMove[ttIndex];
+    
+    let emptySpaces = BOARD_MASK & ~(redPieces | bluePieces);
+    let candidates = [];
+    
+    for (let i = 0n; i < 121n; i++) {
+        if (emptySpaces & (1n << i)) {
+            let idx = Number(i);
+            if (idx === ttMove) {
+                candidates.push({idx, score: isMaximizing ? 9999999 : -9999999});
+                continue;
+            }
+            let nr = currentPlayer === 1 ? (redPieces | (1n << i)) : redPieces;
+            let nb = currentPlayer === 2 ? (bluePieces | (1n << i)) : bluePieces;
+            candidates.push({idx, score: evalBB(nr, nb, currentPlayer)});
+        }
+    }
+    
+    candidates.sort((a,b) => b.score - a.score);
+    let limit = Math.min(candidates.length, 12); 
+    
+    for (let i = 0; i < limit; i++) {
+        let move = candidates[i].idx;
+        let nextRed = redPieces;
+        let nextBlue = bluePieces;
+        if (currentPlayer === 1) nextRed |= (1n << BigInt(move));
+        else nextBlue |= (1n << BigInt(move));
         
+        let nextHash = hash ^ ZOBRIST_PIECES[(currentPlayer - 1) * 121 + move];
         let nextPlaced = piecesPlaced + 1;
         let nextAllowed = piecesAllowed;
         let nextIsMaximizing = isMaximizing;
-
+        let nextPlayer = currentPlayer;
+        
+        nextHash ^= ZOBRIST_TURN[(currentPlayer - 1) * 3 + piecesPlaced];
         if (nextPlaced === nextAllowed) {
             nextIsMaximizing = !isMaximizing;
             nextPlaced = 0;
-            nextAllowed = 2; 
+            nextAllowed = 2;
+            nextPlayer = 3 - currentPlayer;
         }
-
-        let ev = minimax(tempBoard, depth - 1, alpha, beta, nextIsMaximizing, aiPlayerId, nextPlaced, nextAllowed);
-        tempBoard[move] = 0;
-
+        nextHash ^= ZOBRIST_TURN[(nextPlayer - 1) * 3 + nextPlaced];
+        
+        let ev = minimax(nextRed, nextBlue, nextHash, depth - 1, alpha, beta, nextIsMaximizing, nextPlayer, nextPlaced, nextAllowed, aiPlayerId);
+        
         if (isMaximizing) {
-            bestEval = Math.max(bestEval, ev);
+            if (ev > bestEval) { bestEval = ev; bestMove = move; }
             alpha = Math.max(alpha, ev);
         } else {
-            bestEval = Math.min(bestEval, ev);
+            if (ev < bestEval) { bestEval = ev; bestMove = move; }
             beta = Math.min(beta, ev);
         }
-        if (beta <= alpha) break; 
+        if (beta <= alpha) break;
     }
+    
+    tt_hash[ttIndex] = hash;
+    tt_depth[ttIndex] = depth;
+    tt_val[ttIndex] = bestEval;
+    tt_bestMove[ttIndex] = bestMove;
+    if (bestEval <= origAlpha) tt_flag[ttIndex] = UPPERBOUND;
+    else if (bestEval >= beta) tt_flag[ttIndex] = LOWERBOUND;
+    else tt_flag[ttIndex] = EXACT;
+    
     return bestEval;
 }
 
 self.onmessage = function(e) {
-    const { boardData, moves, depth, aiPlayerId, piecesPlaced, piecesAllowed, sharedBuffer } = e.data;
-    const board = new Uint8Array(boardData);
+    const { redPieces, bluePieces, baseHash, moves, depth, aiPlayerId, piecesPlaced, piecesAllowed, sharedBuffer } = e.data;
     
     let sharedAlpha = null;
-    if (sharedBuffer) {
-        sharedAlpha = new Int32Array(sharedBuffer);
-    }
+    if (sharedBuffer) sharedAlpha = new Int32Array(sharedBuffer);
 
     let bestMove = null;
     let maxEval = -Infinity;
@@ -290,25 +328,31 @@ self.onmessage = function(e) {
             initialAlpha = Math.max(-Infinity, currentGlobalAlpha);
         }
 
-        board[move] = aiPlayerId;
+        let nextRed = redPieces;
+        let nextBlue = bluePieces;
+        if (aiPlayerId === 1) nextRed |= (1n << BigInt(move));
+        else nextBlue |= (1n << BigInt(move));
         
+        let nextHash = baseHash ^ ZOBRIST_PIECES[(aiPlayerId - 1) * 121 + move];
         let nextPlaced = piecesPlaced + 1;
         let nextAllowed = piecesAllowed;
-        let nextIsMaximizing = true; 
-        
+        let nextIsMaximizing = true;
+        let nextPlayer = aiPlayerId;
+
+        nextHash ^= ZOBRIST_TURN[(aiPlayerId - 1) * 3 + piecesPlaced];
         if (nextPlaced === nextAllowed) {
             nextIsMaximizing = false;
             nextPlaced = 0;
             nextAllowed = 2;
+            nextPlayer = 3 - aiPlayerId;
         }
+        nextHash ^= ZOBRIST_TURN[(nextPlayer - 1) * 3 + nextPlaced];
 
-        let evalScore = minimax(board, depth - 1, initialAlpha, Infinity, nextIsMaximizing, aiPlayerId, nextPlaced, nextAllowed);
-        board[move] = 0;
+        let evalScore = minimax(nextRed, nextBlue, nextHash, depth - 1, initialAlpha, Infinity, nextIsMaximizing, nextPlayer, nextPlaced, nextAllowed, aiPlayerId);
         
         if (evalScore > maxEval) {
             maxEval = evalScore;
             bestMove = move;
-            
             if (sharedAlpha) {
                 let expectedAlpha = Atomics.load(sharedAlpha, 0);
                 while (evalScore > expectedAlpha) {
@@ -324,8 +368,11 @@ self.onmessage = function(e) {
 };
 </script>
 
-<!-- 主程式 UI 互動與繪圖邏輯 -->
+<!-- 主程式 -->
 <script>
+// 動態掛載共用的 Bitboard 邏輯
+eval(document.getElementById('hexCoreLogic').textContent);
+
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 const statusDiv = document.getElementById('status');
@@ -335,21 +382,13 @@ const progressContainer = document.getElementById('progressContainer');
 const progressBar = document.getElementById('progressBar');
 const depthInput = document.getElementById('depthInput');
 
-// ==========================================
-// PERFECT CENTERING CALCULATIONS
-// ==========================================
-const HEX_RADIUS = 26; 
+const HEX_RADIUS = 22;
 const HEX_WIDTH = Math.sqrt(3) * HEX_RADIUS;
 const HEX_HEIGHT = 2 * HEX_RADIUS;
-
-// Total exact dimensions of the 11x11 hexagonal bounding box
-const TOTAL_WIDTH = SIZE * HEX_WIDTH + (SIZE - 1) * (HEX_WIDTH / 2);
-const TOTAL_HEIGHT = SIZE * HEX_HEIGHT * 0.75 + HEX_HEIGHT * 0.25;
-
-// Calculating offsets to perfectly center the entire grid within the canvas
-const X_OFFSET = (canvas.width - TOTAL_WIDTH) / 2 + (HEX_WIDTH / 2);
-const Y_OFFSET = (canvas.height - TOTAL_HEIGHT) / 2 + (HEX_HEIGHT / 2);
-// ==========================================
+const TOTAL_WIDTH = HEX_WIDTH + (SIZE - 1) * HEX_WIDTH * 1.5;
+const TOTAL_HEIGHT = HEX_HEIGHT + (SIZE - 1) * HEX_HEIGHT * 0.75;
+const X_OFFSET = canvas.width / 2 - TOTAL_WIDTH / 2 + HEX_WIDTH / 2;
+const Y_OFFSET = canvas.height / 2 - TOTAL_HEIGHT / 2 + HEX_HEIGHT / 2;
 
 let board = new Uint8Array(SIZE * SIZE);
 let history = []; 
@@ -359,10 +398,9 @@ let piecesAllowedThisTurn = 1;
 let gameOver = false;
 let gameMode = 'pve';
 let isAIThinking = false;
-let aiSearchDepth = 3;
+let aiSearchDepth = 5;
 let aiDelayTimeout = null;
 
-// 多核設定
 let hasSharedMemory = typeof SharedArrayBuffer !== 'undefined';
 const maxCores = navigator.hardwareConcurrency || 4;
 let activeWorkers = [];
@@ -370,10 +408,16 @@ let totalMovesToProcess = 0;
 let processedMovesCount = 0;
 
 if (hasSharedMemory) {
-    coreInfoDiv.textContent = `⚡ Atomics 同步啟動：完美調用 ${maxCores} 核心分工`;
+    coreInfoDiv.textContent = `⚡ Zobrist 快取 + ${maxCores} 核平行處理啟動`;
 } else {
     coreInfoDiv.style.color = "#d93025";
-    coreInfoDiv.innerHTML = `⚠️ 伺服器缺少 COOP/COEP 標頭，安全退回單核降級模式。`;
+    coreInfoDiv.innerHTML = `⚠️ 無 COOP/COEP 標頭，套用 Zobrist 快取但退回單核模式。`;
+}
+
+function getPiecesMask(player) {
+    let m = 0n;
+    for (let i = 0; i < 121; i++) if (board[i] === player) m |= (1n << BigInt(i));
+    return m;
 }
 
 function getHexCenter(r, c) {
@@ -382,12 +426,10 @@ function getHexCenter(r, c) {
     return { x, y };
 }
 
-// 取得六邊形頂點 (0:右上方, 順時針旋轉)
 function getHexVertices(cx, cy, radius) {
     const vertices = [];
     for (let i = 0; i < 6; i++) {
-        const angle_deg = 60 * i - 30;
-        const angle_rad = Math.PI / 180 * angle_deg;
+        const angle_rad = Math.PI / 180 * (60 * i - 30);
         vertices.push({ x: cx + radius * Math.cos(angle_rad), y: cy + radius * Math.sin(angle_rad) });
     }
     return vertices;
@@ -396,7 +438,6 @@ function getHexVertices(cx, cy, radius) {
 function drawHexagon(r, c, fillStyle, hasShadow = false) {
     const { x, y } = getHexCenter(r, c);
     const vertices = getHexVertices(x, y, HEX_RADIUS);
-
     ctx.beginPath();
     ctx.moveTo(vertices[0].x, vertices[0].y);
     for (let i = 1; i < 6; i++) ctx.lineTo(vertices[i].x, vertices[i].y);
@@ -407,9 +448,7 @@ function drawHexagon(r, c, fillStyle, hasShadow = false) {
         ctx.shadowBlur = 6;
         ctx.shadowOffsetX = 2;
         ctx.shadowOffsetY = 4;
-    } else {
-        ctx.shadowColor = 'transparent';
-    }
+    } else { ctx.shadowColor = 'transparent'; }
 
     ctx.fillStyle = fillStyle;
     ctx.fill();
@@ -422,77 +461,73 @@ function drawHexagon(r, c, fillStyle, hasShadow = false) {
 function drawPieces() {
     for (let i = 0; i < SIZE * SIZE; i++) {
         if (board[i] !== 0) {
-            let r = Math.floor(i / SIZE);
-            let c = i % SIZE;
+            let r = Math.floor(i / SIZE), c = i % SIZE;
             const { x, y } = getHexCenter(r, c);
             const vertices = getHexVertices(x, y, HEX_RADIUS);
-            
             ctx.beginPath();
             ctx.moveTo(vertices[0].x, vertices[0].y);
             for (let v = 1; v < 6; v++) ctx.lineTo(vertices[v].x, vertices[v].y);
             ctx.closePath();
-
             const gradient = ctx.createRadialGradient(x - 5, y - 5, 2, x, y, HEX_RADIUS);
             if (board[i] === 1) {
-                gradient.addColorStop(0, '#ff6b6b');
-                gradient.addColorStop(1, '#c92a2a');
+                gradient.addColorStop(0, '#ff6b6b'); gradient.addColorStop(1, '#c92a2a');
             } else {
-                gradient.addColorStop(0, '#4dabf7');
-                gradient.addColorStop(1, '#1864ab');
+                gradient.addColorStop(0, '#4dabf7'); gradient.addColorStop(1, '#1864ab');
             }
-            
-            ctx.fillStyle = gradient;
-            ctx.fill();
-            ctx.strokeStyle = 'rgba(0,0,0,0.5)';
-            ctx.lineWidth = 1;
-            ctx.stroke();
+            ctx.fillStyle = gradient; ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1; ctx.stroke();
         }
     }
 }
 
+// 修正後的精準邊界繪製邏輯
 function drawBoundaries() {
-    ctx.lineWidth = 6;
+    ctx.lineWidth = 5;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // 紅色邊界 (上: row 0) 
+    // 紅色邊界 (上下)
     ctx.strokeStyle = '#c92a2a';
     ctx.beginPath();
     for (let c = 0; c < SIZE; c++) {
         let v = getHexVertices(getHexCenter(0, c).x, getHexCenter(0, c).y, HEX_RADIUS);
         if (c === 0) ctx.moveTo(v[4].x, v[4].y);
-        ctx.lineTo(v[5].x, v[5].y); 
+        ctx.lineTo(v[5].x, v[5].y);
         ctx.lineTo(v[0].x, v[0].y);
     }
     ctx.stroke();
 
-    // 紅色邊界 (下: row SIZE-1) 
     ctx.beginPath();
     for (let c = 0; c < SIZE; c++) {
         let v = getHexVertices(getHexCenter(SIZE - 1, c).x, getHexCenter(SIZE - 1, c).y, HEX_RADIUS);
         if (c === 0) ctx.moveTo(v[3].x, v[3].y);
-        ctx.lineTo(v[2].x, v[2].y); 
+        ctx.lineTo(v[2].x, v[2].y);
         ctx.lineTo(v[1].x, v[1].y);
     }
     ctx.stroke();
 
-    // 藍色邊界 (左: col 0) 
+    // 藍色邊界 (左右) - 完全修復幾何階梯連線
     ctx.strokeStyle = '#1864ab';
     ctx.beginPath();
     for (let r = 0; r < SIZE; r++) {
         let v = getHexVertices(getHexCenter(r, 0).x, getHexCenter(r, 0).y, HEX_RADIUS);
         if (r === 0) ctx.moveTo(v[4].x, v[4].y);
-        ctx.lineTo(v[3].x, v[3].y); 
-        ctx.lineTo(v[2].x, v[2].y);
+        ctx.lineTo(v[3].x, v[3].y);
+        if (r !== SIZE - 1) {
+            ctx.lineTo(v[2].x, v[2].y);
+        }
     }
     ctx.stroke();
 
-    // 藍色邊界 (右: col SIZE-1) 
     ctx.beginPath();
     for (let r = 0; r < SIZE; r++) {
         let v = getHexVertices(getHexCenter(r, SIZE - 1).x, getHexCenter(r, SIZE - 1).y, HEX_RADIUS);
-        if (r === 0) ctx.moveTo(v[5].x, v[5].y);
-        ctx.lineTo(v[0].x, v[0].y); 
+        if (r === 0) {
+            ctx.moveTo(v[0].x, v[0].y);
+        } else {
+            ctx.lineTo(v[5].x, v[5].y);
+            ctx.lineTo(v[0].x, v[0].y);
+        }
         ctx.lineTo(v[1].x, v[1].y);
     }
     ctx.stroke();
@@ -503,22 +538,18 @@ function render() {
     for (let r = 0; r < SIZE; r++) {
         for (let c = 0; c < SIZE; c++) drawHexagon(r, c, '#f9d18c', true);
     }
-    drawPieces();
-    drawBoundaries();
+    drawPieces(); drawBoundaries();
 }
 
 function updateStatus() {
     if (gameOver) return;
-    const pName = currentPlayer === 1 ? '🔴 紅棋' : '🔵 藍棋';
-    statusDiv.textContent = `輪到 ${pName} (${piecesPlacedThisTurn + 1}/${piecesAllowedThisTurn} 子)`;
+    statusDiv.textContent = `輪到 ${currentPlayer === 1 ? '🔴 紅棋' : '🔵 藍棋'} (${piecesPlacedThisTurn + 1}/${piecesAllowedThisTurn} 子)`;
 }
 
 function updateDepth() {
     let val = parseInt(depthInput.value);
-    if (isNaN(val) || val < 1) val = 1;
-    if (val > 8) val = 8;
-    depthInput.value = val;
-    aiSearchDepth = val;
+    if (isNaN(val) || val < 1) val = 1; if (val > 12) val = 12;
+    depthInput.value = val; aiSearchDepth = val;
 }
 
 function processMove(index) {
@@ -528,31 +559,23 @@ function processMove(index) {
     piecesPlacedThisTurn++;
     history.push({ index, player: currentPlayer, placed: piecesPlacedThisTurn, allowed: piecesAllowedThisTurn });
 
-    if (checkWinState(board, currentPlayer)) {
+    if (checkWinBB(getPiecesMask(currentPlayer), currentPlayer)) {
         render();
         statusDiv.textContent = `🎉 ${(currentPlayer === 1 ? '🔴 紅棋' : '🔵 藍棋')} 獲勝！`;
-        gameOver = true;
-        return;
+        gameOver = true; return;
     }
 
     if (piecesPlacedThisTurn >= piecesAllowedThisTurn) {
         currentPlayer = 3 - currentPlayer;
-        piecesPlacedThisTurn = 0;
-        piecesAllowedThisTurn = 2; 
+        piecesPlacedThisTurn = 0; piecesAllowedThisTurn = 2; 
     }
 
-    render();
-    updateStatus();
-    checkAITurn();
+    render(); updateStatus(); checkAITurn();
 }
 
 function undoMove() {
     if (history.length === 0 || isAIThinking) return;
-    
-    if (aiDelayTimeout) {
-        clearTimeout(aiDelayTimeout);
-        aiDelayTimeout = null;
-    }
+    if (aiDelayTimeout) { clearTimeout(aiDelayTimeout); aiDelayTimeout = null; }
 
     gameOver = false;
     const lastMove = history.pop();
@@ -562,8 +585,7 @@ function undoMove() {
     piecesPlacedThisTurn = lastMove.placed - 1;
     piecesAllowedThisTurn = lastMove.allowed;
 
-    render();
-    updateStatus();
+    render(); updateStatus();
 
     let isAITurn = (gameMode === 'pve' && currentPlayer === 2) || (gameMode === 'evp' && currentPlayer === 1);
     if (isAITurn) {
@@ -575,33 +597,45 @@ function undoMove() {
 function checkAITurn() {
     if (gameOver || history.length === 0 && gameMode === 'pvp') return;
     let isAITurn = (gameMode === 'pve' && currentPlayer === 2) || (gameMode === 'evp' && currentPlayer === 1);
-    if (isAITurn && !isAIThinking) {
-        triggerAIWorker();
-    }
+    if (isAITurn && !isAIThinking) triggerAIWorker();
 }
 
 function triggerAIWorker() {
-    isAIThinking = true;
-    undoBtn.disabled = true;
-    document.getElementById('modeSelect').disabled = true;
+    isAIThinking = true; undoBtn.disabled = true; document.getElementById('modeSelect').disabled = true;
     updateDepth();
 
     statusDiv.style.color = "#1e8e3e";
-    statusDiv.textContent = `🤖 AI 多核運算中 (深度 ${aiSearchDepth})...`;
+    statusDiv.textContent = `🤖 AI 位元查表演算中 (深度 ${aiSearchDepth})...`;
     
-    let candidates = generateCandidates(board, currentPlayer);
+    let redPieces = getPiecesMask(1);
+    let bluePieces = getPiecesMask(2);
+    let emptySpaces = BOARD_MASK & ~(redPieces | bluePieces);
     
-    if (candidates.length === 0) {
-        isAIThinking = false;
-        gameOver = true;
-        statusDiv.textContent = "🏳️ AI 無路可走！";
-        return;
+    let candidates = [];
+    for (let i = 0n; i < 121n; i++) {
+        if (emptySpaces & (1n << i)) {
+            let idx = Number(i);
+            let nr = currentPlayer === 1 ? (redPieces | (1n<<i)) : redPieces;
+            let nb = currentPlayer === 2 ? (bluePieces | (1n<<i)) : bluePieces;
+            candidates.push({ move: idx, score: evalBB(nr, nb, currentPlayer) });
+        }
+    }
+    candidates.sort((a,b) => b.score - a.score);
+    let topCandidates = candidates.slice(0, 14).map(c => c.move);
+
+    if (topCandidates.length === 0) {
+        isAIThinking = false; gameOver = true;
+        statusDiv.textContent = "🏳️ AI 無路可走！"; return;
     }
 
-    progressContainer.style.display = 'block';
-    progressBar.style.width = '0%';
-    totalMovesToProcess = candidates.length;
-    processedMovesCount = 0;
+    progressContainer.style.display = 'block'; progressBar.style.width = '0%';
+    totalMovesToProcess = topCandidates.length; processedMovesCount = 0;
+
+    let baseHash = ZOBRIST_TURN[(currentPlayer - 1) * 3 + piecesPlacedThisTurn];
+    for (let i = 0n; i < 121n; i++) {
+        if (redPieces & (1n << i)) baseHash ^= ZOBRIST_PIECES[Number(i)]; 
+        if (bluePieces & (1n << i)) baseHash ^= ZOBRIST_PIECES[121 + Number(i)]; 
+    }
 
     const fullWorkerCode = document.getElementById('hexCoreLogic').textContent + "\n" + document.getElementById('aiWorkerCode').textContent;
     const workerBlob = new Blob([fullWorkerCode], { type: "text/javascript" });
@@ -616,16 +650,10 @@ function triggerAIWorker() {
         effectiveCores = maxCores;
     }
 
-    const chunks = [];
-    for (let i = 0; i < effectiveCores; i++) chunks.push([]);
-    candidates.forEach((move, index) => {
-        chunks[index % effectiveCores].push(move);
-    });
+    const chunks = Array.from({length: effectiveCores}, () => []);
+    topCandidates.forEach((move, index) => chunks[index % effectiveCores].push(move));
 
-    let bestGlobalMove = null;
-    let maxGlobalEval = -Infinity;
-    let completedWorkers = 0;
-    let actualWorkersUsed = 0;
+    let bestGlobalMove = null, maxGlobalEval = -Infinity, completedWorkers = 0, actualWorkersUsed = 0;
     activeWorkers = [];
 
     chunks.forEach(chunk => {
@@ -642,32 +670,26 @@ function triggerAIWorker() {
             } else if (e.data.type === 'done') {
                 completedWorkers++;
                 if (e.data.bestMove !== null && e.data.maxEval > maxGlobalEval) {
-                    maxGlobalEval = e.data.maxEval;
-                    bestGlobalMove = e.data.bestMove;
+                    maxGlobalEval = e.data.maxEval; bestGlobalMove = e.data.bestMove;
                 }
                 if (completedWorkers === actualWorkersUsed) {
                     activeWorkers.forEach(w => w.terminate());
                     URL.revokeObjectURL(workerUrl);
                     
                     progressContainer.style.display = 'none';
-                    isAIThinking = false;
-                    undoBtn.disabled = false;
-                    document.getElementById('modeSelect').disabled = false;
+                    isAIThinking = false; undoBtn.disabled = false; document.getElementById('modeSelect').disabled = false;
                     
                     statusDiv.style.color = "#d93025";
-                    processMove(bestGlobalMove !== null ? bestGlobalMove : candidates[0]);
+                    processMove(bestGlobalMove !== null ? bestGlobalMove : topCandidates[0]);
                 }
             }
         };
 
         worker.postMessage({
-            boardData: board.buffer,
-            moves: chunk,
-            depth: aiSearchDepth,
-            aiPlayerId: currentPlayer,
-            piecesPlaced: piecesPlacedThisTurn,
-            piecesAllowed: piecesAllowedThisTurn,
-            sharedBuffer: sharedBuffer 
+            redPieces, bluePieces, baseHash,
+            moves: chunk, depth: aiSearchDepth,
+            aiPlayerId: currentPlayer, piecesPlaced: piecesPlacedThisTurn, piecesAllowed: piecesAllowedThisTurn,
+            sharedBuffer
         });
     });
 }
@@ -687,48 +709,31 @@ canvas.addEventListener('click', (e) => {
         for (let c = 0; c < SIZE; c++) {
             const { x, y } = getHexCenter(r, c);
             if (Math.hypot(mx - x, my - y) < HEX_RADIUS * 0.9) {
-                processMove(r * SIZE + c);
-                return;
+                processMove(r * SIZE + c); return;
             }
         }
     }
 });
 
 function init() {
-    board.fill(0);
-    history = [];
-    currentPlayer = 1;
-    piecesPlacedThisTurn = 0;
-    piecesAllowedThisTurn = 1;
-    gameOver = false;
-    isAIThinking = false;
+    board.fill(0); history = [];
+    currentPlayer = 1; piecesPlacedThisTurn = 0; piecesAllowedThisTurn = 1;
+    gameOver = false; isAIThinking = false;
     if (aiDelayTimeout) clearTimeout(aiDelayTimeout);
     
-    updateDepth();
-    gameMode = document.getElementById('modeSelect').value;
-    undoBtn.disabled = false;
-    progressContainer.style.display = 'none';
+    updateDepth(); gameMode = document.getElementById('modeSelect').value;
+    undoBtn.disabled = false; progressContainer.style.display = 'none';
 
-    render();
-    updateStatus();
-
-    if (gameMode === 'evp') {
-        setTimeout(triggerAIWorker, 100);
-    }
+    render(); updateStatus();
+    if (gameMode === 'evp') setTimeout(triggerAIWorker, 100);
 }
 
 function restartGame() {
-    if (isAIThinking) {
-        activeWorkers.forEach(w => w.terminate());
-        activeWorkers = [];
-        isAIThinking = false;
-    }
+    if (isAIThinking) { activeWorkers.forEach(w => w.terminate()); activeWorkers = []; isAIThinking = false; }
     init();
 }
 
-function changeMode() {
-    if (!isAIThinking) init();
-}
+function changeMode() { if (!isAIThinking) init(); }
 
 init();
 </script>
