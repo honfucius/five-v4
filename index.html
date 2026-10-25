@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>11x11 納許棋 (Hex) - 位元棋盤極速版</title>
+<title>11x11 納許棋 - 終極啟發多核 AI 版</title>
 <style>
 body {
     margin: 0;
@@ -77,7 +77,7 @@ canvas {
     <input type="number" id="depthInput" value="7" min="1" max="20" onchange="updateDepth()">
 </div>
 
-<h2>🎯 11x11 納許棋 (BigInt 位元加速版)</h2>
+<h2>🎯 11x11 納許棋 (終極啟發多核版)</h2>
 <div id="status">紅棋先手 (下 1 子)</div>
 <div id="coreInfo"></div>
 
@@ -99,20 +99,19 @@ canvas {
 <canvas id="gameCanvas" width="800" height="600"></canvas>
 
 <div class="rules">
-    <h3>📝 規則與系統說明</h3>
+    <h3>📝 系統與 AI 技術說明</h3>
     <ul>
-        <li><strong>勝負條件：</strong>紅棋需連接上下邊界，藍棋需連接左右邊界。</li>
-        <li><strong>落子規則：</strong>採 1-2-2-2-2 制。首回合紅棋下 1 子，之後雙方每回合皆下 2 子。</li>
-        <li><strong>位元棋盤 (Bitboards)：</strong>將 121 格壓縮為 BigInt，利用位元平移極速拓展路徑，效能大幅躍升。</li>
-        <li><strong>Zobrist 置換表 (TT)：</strong>每個運算核心內建 52 萬筆快取，透過 64-bit 雜湊記憶曾推演過的盤面，秒殺重複決策分支！</li>
+        <li><strong>精準邊界：</strong>紅藍鋸齒邊界完美貼合頂點，幾何相切零死角。</li>
+        <li><strong>位元棋盤 (Bitboards)：</strong>121 格壓縮為 BigInt，利用位元平移極速運算。</li>
+        <li><strong>迭代加深 (Iterative Deepening)：</strong>由淺入深推演，利用淺層的最佳步優化深層的搜尋排序。</li>
+        <li><strong>殺手與歷史啟發 (Killer & History)：</strong>AI 會記憶曾引發剪枝的黃金防守步，遇新盤面優先嘗試，極大化剪枝效率！</li>
     </ul>
 </div>
 
-<!-- 核心演算法 (主執行緒與 Worker 共用 Bitboards 與 Zobrist 初始化) -->
+<!-- 核心演算法 (主執行緒與 Worker 共用) -->
 <script id="hexCoreLogic">
 const SIZE = 11;
 
-// 初始化 Bitboard 遮罩
 let NOT_COL_0 = 0n;
 let NOT_COL_10 = 0n;
 let RED_TOP = 0n;
@@ -134,7 +133,6 @@ for (let r = 0; r < SIZE; r++) {
     }
 }
 
-// 初始化 Zobrist Hash
 const ZOBRIST_PIECES = new BigInt64Array(121 * 2);
 const ZOBRIST_TURN = new BigInt64Array(2 * 3);
 let _seed = 12345;
@@ -148,17 +146,10 @@ function nextRandomBigInt() {
 for (let i = 0; i < 242; i++) ZOBRIST_PIECES[i] = nextRandomBigInt();
 for (let i = 0; i < 6; i++) ZOBRIST_TURN[i] = nextRandomBigInt();
 
-// BigInt 相鄰格子拓展
 function getNeighborsBB(x) {
-    return ((x >> 11n) | 
-            (x << 11n) | 
-            ((x >> 10n) & NOT_COL_0) | 
-            ((x << 1n) & NOT_COL_0) | 
-            ((x >> 1n) & NOT_COL_10) | 
-            ((x << 10n) & NOT_COL_10)) & BOARD_MASK;
+    return ((x >> 11n) | (x << 11n) | ((x >> 10n) & NOT_COL_0) | ((x << 1n) & NOT_COL_0) | ((x >> 1n) & NOT_COL_10) | ((x << 10n) & NOT_COL_10)) & BOARD_MASK;
 }
 
-// 檢查勝負狀態
 function checkWinBB(pieces, player) {
     let connected = player === 1 ? (pieces & RED_TOP) : (pieces & BLUE_LEFT);
     if (connected === 0n) return false;
@@ -171,7 +162,6 @@ function checkWinBB(pieces, player) {
     return (connected & target) !== 0n;
 }
 
-// 計算最短連通距離
 function getDistanceBB(pieces, emptySpaces, player) {
     let target = player === 1 ? RED_BOTTOM : BLUE_RIGHT;
     let reached = 0n;
@@ -194,7 +184,6 @@ function getDistanceBB(pieces, emptySpaces, player) {
     return 9999;
 }
 
-// 啟發式評估函數
 function evalBB(red, blue, povPlayer) {
     let emptySpaces = BOARD_MASK & ~(red | blue);
     let redDist = getDistanceBB(red, emptySpaces, 1);
@@ -207,9 +196,9 @@ function evalBB(red, blue, povPlayer) {
 }
 </script>
 
-<!-- Worker 腳本 (包含 Transposition Table 與 Alpha-Beta) -->
+<!-- Worker 腳本 (包含 TT, 迭代加深, 殺手啟發與歷史啟發) -->
 <script id="aiWorkerCode" type="javascript/worker">
-const TT_SIZE = 1 << 19; // 524,288 筆快取
+const TT_SIZE = 1 << 19; // 524,288
 const TT_MASK = BigInt(TT_SIZE - 1);
 const tt_hash = new BigInt64Array(TT_SIZE);
 const tt_depth = new Int8Array(TT_SIZE);
@@ -218,8 +207,13 @@ const tt_val = new Int32Array(TT_SIZE);
 const tt_bestMove = new Int8Array(TT_SIZE);
 
 const EXACT = 1, LOWERBOUND = 2, UPPERBOUND = 3;
+const MAX_PLY = 64;
 
-function minimax(redPieces, bluePieces, hash, depth, alpha, beta, isMaximizing, currentPlayer, piecesPlaced, piecesAllowed, aiPlayerId) {
+// Heuristics Tables (Each worker thread maintains its own)
+const killerMoves = Array.from({length: MAX_PLY}, () => new Int8Array([-1, -1]));
+const historyTable = [new Int32Array(121), new Int32Array(121)];
+
+function minimax(redPieces, bluePieces, hash, depth, ply, alpha, beta, isMaximizing, currentPlayer, piecesPlaced, piecesAllowed, aiPlayerId) {
     let ttIndex = Number(hash & TT_MASK);
     if (tt_hash[ttIndex] === hash && tt_depth[ttIndex] >= depth) {
         let flag = tt_flag[ttIndex];
@@ -252,13 +246,13 @@ function minimax(redPieces, bluePieces, hash, depth, alpha, beta, isMaximizing, 
     for (let i = 0n; i < 121n; i++) {
         if (emptySpaces & (1n << i)) {
             let idx = Number(i);
-            if (idx === ttMove) {
-                candidates.push({idx, score: isMaximizing ? 9999999 : -9999999});
-                continue;
-            }
-            let nr = currentPlayer === 1 ? (redPieces | (1n << i)) : redPieces;
-            let nb = currentPlayer === 2 ? (bluePieces | (1n << i)) : bluePieces;
-            candidates.push({idx, score: evalBB(nr, nb, currentPlayer)});
+            let score = 0;
+            // 先進的節點排序：TT > Killer 1 > Killer 2 > History
+            if (idx === ttMove) score = 20000000;
+            else if (idx === killerMoves[ply][0]) score = 10000000;
+            else if (idx === killerMoves[ply][1]) score = 9000000;
+            else score = historyTable[currentPlayer - 1][idx];
+            candidates.push({ move: idx, score: score });
         }
     }
     
@@ -266,7 +260,7 @@ function minimax(redPieces, bluePieces, hash, depth, alpha, beta, isMaximizing, 
     let limit = Math.min(candidates.length, 12); 
     
     for (let i = 0; i < limit; i++) {
-        let move = candidates[i].idx;
+        let move = candidates[i].move;
         let nextRed = redPieces;
         let nextBlue = bluePieces;
         if (currentPlayer === 1) nextRed |= (1n << BigInt(move));
@@ -287,16 +281,32 @@ function minimax(redPieces, bluePieces, hash, depth, alpha, beta, isMaximizing, 
         }
         nextHash ^= ZOBRIST_TURN[(nextPlayer - 1) * 3 + nextPlaced];
         
-        let ev = minimax(nextRed, nextBlue, nextHash, depth - 1, alpha, beta, nextIsMaximizing, nextPlayer, nextPlaced, nextAllowed, aiPlayerId);
+        let ev = minimax(nextRed, nextBlue, nextHash, depth - 1, ply + 1, alpha, beta, nextIsMaximizing, nextPlayer, nextPlaced, nextAllowed, aiPlayerId);
         
         if (isMaximizing) {
             if (ev > bestEval) { bestEval = ev; bestMove = move; }
             alpha = Math.max(alpha, ev);
+            if (beta <= alpha) {
+                // Beta Cutoff (更新殺手步與歷史分數)
+                if (killerMoves[ply][0] !== move) {
+                    killerMoves[ply][1] = killerMoves[ply][0];
+                    killerMoves[ply][0] = move;
+                }
+                historyTable[currentPlayer - 1][move] += depth * depth;
+                break;
+            }
         } else {
             if (ev < bestEval) { bestEval = ev; bestMove = move; }
             beta = Math.min(beta, ev);
+            if (beta <= alpha) {
+                if (killerMoves[ply][0] !== move) {
+                    killerMoves[ply][1] = killerMoves[ply][0];
+                    killerMoves[ply][0] = move;
+                }
+                historyTable[currentPlayer - 1][move] += depth * depth;
+                break;
+            }
         }
-        if (beta <= alpha) break;
     }
     
     tt_hash[ttIndex] = hash;
@@ -311,66 +321,86 @@ function minimax(redPieces, bluePieces, hash, depth, alpha, beta, isMaximizing, 
 }
 
 self.onmessage = function(e) {
-    const { redPieces, bluePieces, baseHash, moves, depth, aiPlayerId, piecesPlaced, piecesAllowed, sharedBuffer } = e.data;
+    const { redPieces, bluePieces, baseHash, moves, targetDepth, aiPlayerId, piecesPlaced, piecesAllowed, sharedBuffer } = e.data;
     
     let sharedAlpha = null;
     if (sharedBuffer) sharedAlpha = new Int32Array(sharedBuffer);
 
-    let bestMove = null;
-    let maxEval = -Infinity;
-    
-    for (let i = 0; i < moves.length; i++) {
-        let move = moves[i];
-        
-        let initialAlpha = -Infinity;
-        if (sharedAlpha) {
-            let currentGlobalAlpha = Atomics.load(sharedAlpha, 0);
-            initialAlpha = Math.max(-Infinity, currentGlobalAlpha);
-        }
+    // Iterative Deepening Setup
+    let rootMoves = moves.map(m => ({ move: m, score: 0 }));
+    let bestGlobalMove = rootMoves[0].move;
+    let maxGlobalEval = -Infinity;
 
-        let nextRed = redPieces;
-        let nextBlue = bluePieces;
-        if (aiPlayerId === 1) nextRed |= (1n << BigInt(move));
-        else nextBlue |= (1n << BigInt(move));
-        
-        let nextHash = baseHash ^ ZOBRIST_PIECES[(aiPlayerId - 1) * 121 + move];
-        let nextPlaced = piecesPlaced + 1;
-        let nextAllowed = piecesAllowed;
-        let nextIsMaximizing = true;
-        let nextPlayer = aiPlayerId;
+    // 清空歷史表以適應新盤面
+    historyTable[0].fill(0);
+    historyTable[1].fill(0);
+    for(let i=0; i<MAX_PLY; i++) { killerMoves[i][0] = -1; killerMoves[i][1] = -1; }
 
-        nextHash ^= ZOBRIST_TURN[(aiPlayerId - 1) * 3 + piecesPlaced];
-        if (nextPlaced === nextAllowed) {
-            nextIsMaximizing = false;
-            nextPlaced = 0;
-            nextAllowed = 2;
-            nextPlayer = 3 - aiPlayerId;
-        }
-        nextHash ^= ZOBRIST_TURN[(nextPlayer - 1) * 3 + nextPlaced];
-
-        let evalScore = minimax(nextRed, nextBlue, nextHash, depth - 1, initialAlpha, Infinity, nextIsMaximizing, nextPlayer, nextPlaced, nextAllowed, aiPlayerId);
+    for (let currentDepth = 1; currentDepth <= targetDepth; currentDepth++) {
+        // 利用上一深度的分數來完美排序候選步
+        rootMoves.sort((a, b) => b.score - a.score);
         
-        if (evalScore > maxEval) {
-            maxEval = evalScore;
-            bestMove = move;
-            if (sharedAlpha) {
-                let expectedAlpha = Atomics.load(sharedAlpha, 0);
-                while (evalScore > expectedAlpha) {
-                    let actual = Atomics.compareExchange(sharedAlpha, 0, expectedAlpha, evalScore);
-                    if (actual === expectedAlpha) break;
-                    expectedAlpha = actual;
+        let currentIterMax = -Infinity;
+        let currentIterBest = rootMoves[0].move;
+
+        for (let i = 0; i < rootMoves.length; i++) {
+            let moveObj = rootMoves[i];
+            let move = moveObj.move;
+            
+            let initialAlpha = -Infinity;
+            if (sharedAlpha) initialAlpha = Math.max(-Infinity, Atomics.load(sharedAlpha, 0));
+
+            let nextRed = redPieces;
+            let nextBlue = bluePieces;
+            if (aiPlayerId === 1) nextRed |= (1n << BigInt(move));
+            else nextBlue |= (1n << BigInt(move));
+            
+            let nextHash = baseHash ^ ZOBRIST_PIECES[(aiPlayerId - 1) * 121 + move];
+            let nextPlaced = piecesPlaced + 1;
+            let nextAllowed = piecesAllowed;
+            let nextIsMaximizing = true;
+            let nextPlayer = aiPlayerId;
+
+            nextHash ^= ZOBRIST_TURN[(aiPlayerId - 1) * 3 + piecesPlaced];
+            if (nextPlaced === nextAllowed) {
+                nextIsMaximizing = false;
+                nextPlaced = 0;
+                nextAllowed = 2;
+                nextPlayer = 3 - aiPlayerId;
+            }
+            nextHash ^= ZOBRIST_TURN[(nextPlayer - 1) * 3 + nextPlaced];
+
+            let evalScore = minimax(nextRed, nextBlue, nextHash, currentDepth - 1, 1, initialAlpha, Infinity, nextIsMaximizing, nextPlayer, nextPlaced, nextAllowed, aiPlayerId);
+            
+            moveObj.score = evalScore; // 儲存分數供下一深度排序
+
+            if (evalScore > currentIterMax) {
+                currentIterMax = evalScore;
+                currentIterBest = move;
+                if (sharedAlpha) {
+                    let expectedAlpha = Atomics.load(sharedAlpha, 0);
+                    while (evalScore > expectedAlpha) {
+                        let actual = Atomics.compareExchange(sharedAlpha, 0, expectedAlpha, evalScore);
+                        if (actual === expectedAlpha) break;
+                        expectedAlpha = actual;
+                    }
                 }
             }
         }
-        self.postMessage({ type: 'progress' });
+        
+        bestGlobalMove = currentIterBest;
+        maxGlobalEval = currentIterMax;
+        
+        // 回報每層深度的進度
+        self.postMessage({ type: 'progress', depth: currentDepth, maxDepth: targetDepth });
     }
-    self.postMessage({ type: 'done', bestMove: bestMove, maxEval: maxEval });
+    
+    self.postMessage({ type: 'done', bestMove: bestGlobalMove, maxEval: maxGlobalEval });
 };
 </script>
 
 <!-- 主程式 -->
 <script>
-// 動態掛載共用的 Bitboard 邏輯
 eval(document.getElementById('hexCoreLogic').textContent);
 
 const canvas = document.getElementById('gameCanvas');
@@ -398,20 +428,18 @@ let piecesAllowedThisTurn = 1;
 let gameOver = false;
 let gameMode = 'pve';
 let isAIThinking = false;
-let aiSearchDepth = 5;
+let aiSearchDepth = 8;
 let aiDelayTimeout = null;
 
 let hasSharedMemory = typeof SharedArrayBuffer !== 'undefined';
 const maxCores = navigator.hardwareConcurrency || 4;
 let activeWorkers = [];
-let totalMovesToProcess = 0;
-let processedMovesCount = 0;
 
 if (hasSharedMemory) {
-    coreInfoDiv.textContent = `⚡ Zobrist 快取 + ${maxCores} 核平行處理啟動`;
+    coreInfoDiv.textContent = `⚡ ID迭代加深 + 殺手啟發 + ${maxCores} 核平行同步`;
 } else {
     coreInfoDiv.style.color = "#d93025";
-    coreInfoDiv.innerHTML = `⚠️ 無 COOP/COEP 標頭，套用 Zobrist 快取但退回單核模式。`;
+    coreInfoDiv.innerHTML = `⚠️ 無 COOP/COEP 標頭，退回單核模式。`;
 }
 
 function getPiecesMask(player) {
@@ -480,45 +508,37 @@ function drawPieces() {
     }
 }
 
-// 修正後的精準邊界繪製邏輯
+// 已驗證的精準邊界連線邏輯
 function drawBoundaries() {
-    ctx.lineWidth = 5;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    // 紅色邊界 (上下)
-    ctx.strokeStyle = '#c92a2a';
-    ctx.beginPath();
+    ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    
+    // 紅色 (上)
+    ctx.strokeStyle = '#c92a2a'; ctx.beginPath();
     for (let c = 0; c < SIZE; c++) {
         let v = getHexVertices(getHexCenter(0, c).x, getHexCenter(0, c).y, HEX_RADIUS);
         if (c === 0) ctx.moveTo(v[4].x, v[4].y);
-        ctx.lineTo(v[5].x, v[5].y);
-        ctx.lineTo(v[0].x, v[0].y);
+        ctx.lineTo(v[5].x, v[5].y); ctx.lineTo(v[0].x, v[0].y);
     }
     ctx.stroke();
-
+    // 紅色 (下)
     ctx.beginPath();
     for (let c = 0; c < SIZE; c++) {
         let v = getHexVertices(getHexCenter(SIZE - 1, c).x, getHexCenter(SIZE - 1, c).y, HEX_RADIUS);
         if (c === 0) ctx.moveTo(v[3].x, v[3].y);
-        ctx.lineTo(v[2].x, v[2].y);
-        ctx.lineTo(v[1].x, v[1].y);
+        ctx.lineTo(v[2].x, v[2].y); ctx.lineTo(v[1].x, v[1].y);
     }
     ctx.stroke();
 
-    // 藍色邊界 (左右) - 完全修復幾何階梯連線
-    ctx.strokeStyle = '#1864ab';
-    ctx.beginPath();
+    // 藍色 (左)
+    ctx.strokeStyle = '#1864ab'; ctx.beginPath();
     for (let r = 0; r < SIZE; r++) {
         let v = getHexVertices(getHexCenter(r, 0).x, getHexCenter(r, 0).y, HEX_RADIUS);
         if (r === 0) ctx.moveTo(v[4].x, v[4].y);
         ctx.lineTo(v[3].x, v[3].y);
-        if (r !== SIZE - 1) {
-            ctx.lineTo(v[2].x, v[2].y);
-        }
+        if (r !== SIZE - 1) ctx.lineTo(v[2].x, v[2].y);
     }
     ctx.stroke();
-
+    // 藍色 (右)
     ctx.beginPath();
     for (let r = 0; r < SIZE; r++) {
         let v = getHexVertices(getHexCenter(r, SIZE - 1).x, getHexCenter(r, SIZE - 1).y, HEX_RADIUS);
@@ -548,7 +568,7 @@ function updateStatus() {
 
 function updateDepth() {
     let val = parseInt(depthInput.value);
-    if (isNaN(val) || val < 1) val = 1; if (val > 12) val = 12;
+    if (isNaN(val) || val < 2) val = 2; if (val > 16) val = 16;
     depthInput.value = val; aiSearchDepth = val;
 }
 
@@ -605,7 +625,7 @@ function triggerAIWorker() {
     updateDepth();
 
     statusDiv.style.color = "#1e8e3e";
-    statusDiv.textContent = `🤖 AI 位元查表演算中 (深度 ${aiSearchDepth})...`;
+    statusDiv.textContent = `🤖 AI 啟發式迭代推演中 (深度 ${aiSearchDepth})...`;
     
     let redPieces = getPiecesMask(1);
     let bluePieces = getPiecesMask(2);
@@ -620,8 +640,9 @@ function triggerAIWorker() {
             candidates.push({ move: idx, score: evalBB(nr, nb, currentPlayer) });
         }
     }
+    // 根節點利用基本距離評估，後續深入則交給歷史啟發
     candidates.sort((a,b) => b.score - a.score);
-    let topCandidates = candidates.slice(0, 14).map(c => c.move);
+    let topCandidates = candidates.slice(0, 16).map(c => c.move); // 保留更多根節點供 ID 排序
 
     if (topCandidates.length === 0) {
         isAIThinking = false; gameOver = true;
@@ -629,7 +650,6 @@ function triggerAIWorker() {
     }
 
     progressContainer.style.display = 'block'; progressBar.style.width = '0%';
-    totalMovesToProcess = topCandidates.length; processedMovesCount = 0;
 
     let baseHash = ZOBRIST_TURN[(currentPlayer - 1) * 3 + piecesPlacedThisTurn];
     for (let i = 0n; i < 121n; i++) {
@@ -645,8 +665,7 @@ function triggerAIWorker() {
     let effectiveCores = 1;
     if (hasSharedMemory) {
         sharedBuffer = new SharedArrayBuffer(4);
-        const sharedData = new Int32Array(sharedBuffer);
-        sharedData[0] = -100000000;
+        new Int32Array(sharedBuffer)[0] = -100000000;
         effectiveCores = maxCores;
     }
 
@@ -656,7 +675,10 @@ function triggerAIWorker() {
     let bestGlobalMove = null, maxGlobalEval = -Infinity, completedWorkers = 0, actualWorkersUsed = 0;
     activeWorkers = [];
 
-    chunks.forEach(chunk => {
+    // ID 疊加式進度條追蹤
+    let combinedProgress = new Array(effectiveCores).fill(0);
+
+    chunks.forEach((chunk, workerIdx) => {
         if (chunk.length === 0) return;
         actualWorkersUsed++;
         
@@ -665,8 +687,9 @@ function triggerAIWorker() {
         
         worker.onmessage = function(e) {
             if (e.data.type === 'progress') {
-                processedMovesCount++;
-                progressBar.style.width = `${(processedMovesCount / totalMovesToProcess) * 100}%`;
+                combinedProgress[workerIdx] = e.data.depth / e.data.maxDepth;
+                let total = combinedProgress.reduce((a,b) => a+b, 0) / actualWorkersUsed;
+                progressBar.style.width = `${total * 100}%`;
             } else if (e.data.type === 'done') {
                 completedWorkers++;
                 if (e.data.bestMove !== null && e.data.maxEval > maxGlobalEval) {
@@ -687,7 +710,7 @@ function triggerAIWorker() {
 
         worker.postMessage({
             redPieces, bluePieces, baseHash,
-            moves: chunk, depth: aiSearchDepth,
+            moves: chunk, targetDepth: aiSearchDepth,
             aiPlayerId: currentPlayer, piecesPlaced: piecesPlacedThisTurn, piecesAllowed: piecesAllowedThisTurn,
             sharedBuffer
         });
@@ -732,9 +755,7 @@ function restartGame() {
     if (isAIThinking) { activeWorkers.forEach(w => w.terminate()); activeWorkers = []; isAIThinking = false; }
     init();
 }
-
 function changeMode() { if (!isAIThinking) init(); }
-
 init();
 </script>
 </body>
